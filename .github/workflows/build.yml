@@ -1,88 +1,90 @@
-name: Brave Android - AudioFocus Patch Build
+name: Brave AudioFocus APK Patcher
 
 on:
-  workflow_dispatch:  # Manuell starten per Knopfdruck auf GitHub
+  workflow_dispatch:
+    inputs:
+      brave_version:
+        description: 'Brave Version (leer = automatisch neueste)'
+        required: false
+        default: ''
 
 jobs:
-  build:
+  patch:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360  # 6 Stunden max
+    timeout-minutes: 30
 
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
 
-      - name: Free up disk space
+      - name: Install tools
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
-          df -h
+          sudo apt-get update -qq
+          sudo apt-get install -y wget unzip openjdk-17-jdk python3 aapt zipalign
+          java -version
 
-      - name: Install system dependencies
+      - name: Download apktool
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git curl python3 python3-pip nodejs npm \
-            build-essential libssl-dev pkg-config \
-            openjdk-17-jdk
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
+          wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O apktool
+          chmod +x apktool
+          echo "apktool ready"
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install depot_tools
+      - name: Download uber-apk-signer
         run: |
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git ~/depot_tools
-          echo "$HOME/depot_tools" >> $GITHUB_PATH
+          wget -q https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar -O uber-apk-signer.jar
+          echo "signer ready"
 
-      - name: Clone brave-browser
+      - name: Download latest Brave APK
         run: |
-          git clone https://github.com/brave/brave-browser.git ~/brave-browser
-          cd ~/brave-browser
-          npm install
+          if [ -n "${{ github.event.inputs.brave_version }}" ]; then
+            VERSION="${{ github.event.inputs.brave_version }}"
+          else
+            VERSION=$(curl -s https://api.github.com/repos/brave/brave-browser/releases/latest | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          fi
+          echo "Brave Version: $VERSION"
+          echo "BRAVE_VERSION=$VERSION" >> $GITHUB_ENV
 
-      - name: Sync Brave + Chromium (Android)
-        run: |
-          cd ~/brave-browser
-          npm run sync -- --target_os=android --target_arch=arm64
-        env:
-          DEPOT_TOOLS_UPDATE: 0
+          # Download ARM64 APK von GitHub Releases
+          APK_URL="https://github.com/brave/brave-browser/releases/download/${VERSION}/Bravearm64Universal.apk"
+          echo "Download: $APK_URL"
+          wget -q --show-progress "$APK_URL" -O brave_original.apk
+          ls -lh brave_original.apk
 
-      - name: Install Android build deps
+      - name: Decompile APK
         run: |
-          cd ~/brave-browser/src
-          ./build/install-build-deps.sh --android --no-prompt || true
-          yes | ~/brave-browser/src/third_party/android_sdk/public/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          java -jar apktool.jar d brave_original.apk -o brave_decompiled -f
+          echo "Decompiled. Smali files:"
+          find brave_decompiled/smali* -name "AudioFocusDelegate.smali" 2>/dev/null || echo "not found yet"
 
       - name: Apply AudioFocus patch
         run: |
-          cd ~/brave-browser
-          python3 $GITHUB_WORKSPACE/patches/apply_patch.py
+          python3 patches/apply_patch.py brave_decompiled
 
-      - name: Build Brave for Android (arm64)
+      - name: Recompile APK
         run: |
-          cd ~/brave-browser
-          npm run build -- Release \
-            --target_os=android \
-            --target_arch=arm64 \
-            --target_android_output_format=apk
-        env:
-          JAVA_OPTS: "-Xmx10G -Xms1G"
+          java -jar apktool.jar b brave_decompiled -o brave_patched_unsigned.apk
+          ls -lh brave_patched_unsigned.apk
 
-      - name: Find and collect APK
+      - name: Sign APK
         run: |
-          find ~/brave-browser/src/out -name "*.apk" | head -20
-          mkdir -p /tmp/brave-output
-          find ~/brave-browser/src/out -name "Brave*.apk" -exec cp {} /tmp/brave-output/ \;
-          ls -lh /tmp/brave-output/
+          java -jar uber-apk-signer.jar \
+            -a brave_patched_unsigned.apk \
+            --allowResign \
+            -o output/
+          ls -lh output/
 
-      - name: Upload APK as artifact
+      - name: Rename output
+        run: |
+          cd output
+          for f in *-aligned-signed.apk; do
+            mv "$f" "brave-${BRAVE_VERSION}-audiofocus-patched.apk"
+          done
+          ls -lh
+
+      - name: Upload patched APK
         uses: actions/upload-artifact@v4
         with:
-          name: brave-audiofocus-patched
-          path: /tmp/brave-output/*.apk
-          retention-days: 7
+          name: brave-audiofocus-patched-${{ env.BRAVE_VERSION }}
+          path: output/*.apk
+          retention-days: 30
