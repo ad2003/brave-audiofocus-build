@@ -59,9 +59,9 @@ jobs:
           curl -L --output brave_original.apk "${APK_URL}"
           ls -lh brave_original.apk
 
-      - name: Decompile APK
+      - name: Decompile APK (nur Smali, keine Ressourcen)
         run: |
-          java -jar apktool.jar d brave_original.apk -o brave_decompiled -f --only-main-classes
+          java -jar apktool.jar d brave_original.apk -o brave_decompiled -f -r
           echo "Suche AudioFocusDelegate.smali:"
           find brave_decompiled -name "AudioFocusDelegate.smali"
 
@@ -71,7 +71,7 @@ jobs:
 
       - name: Recompile APK
         run: |
-          java -jar apktool.jar b brave_decompiled -o brave_patched_unsigned.apk --use-aapt2
+          java -jar apktool.jar b brave_decompiled -o brave_patched_unsigned.apk
           ls -lh brave_patched_unsigned.apk
 
       - name: Sign APK
