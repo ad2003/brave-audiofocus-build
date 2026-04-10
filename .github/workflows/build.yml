@@ -49,23 +49,17 @@ jobs:
           VERSION="${BRAVE_VERSION}"
           BASE="https://github.com/brave/brave-browser/releases/download/${VERSION}"
 
-          # Alle bekannten arm64 APK Dateinamen laut Brave Wiki
-          FILENAMES=(
-            "Bravearm64Universal.apk"
-            "BraveMonoarm64.apk"
-          )
-
           SUCCESS=false
-          for FILENAME in "${FILENAMES[@]}"; do
+          for FILENAME in "Bravearm64Universal.apk" "BraveMonoarm64.apk"; do
             URL="${BASE}/${FILENAME}"
-            echo "Versuche: $URL"
-            HTTP_CODE=$(curl -s -o brave_original.apk -w "%{http_code}" -L "$URL")
+            echo "Versuche: ${URL}"
+            HTTP_CODE=$(curl -s -o brave_original.apk -w "%{http_code}" -L "${URL}")
             if [ "$HTTP_CODE" = "200" ] && [ -s brave_original.apk ]; then
-              echo "Erfolgreich: $FILENAME ($HTTP_CODE)"
+              echo "Erfolgreich: ${FILENAME}"
               SUCCESS=true
               break
             else
-              echo "Nicht gefunden: $FILENAME ($HTTP_CODE)"
+              echo "Nicht gefunden: ${FILENAME} (HTTP ${HTTP_CODE})"
               rm -f brave_original.apk
             fi
           done
