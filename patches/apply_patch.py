@@ -2,21 +2,22 @@
 """
 apply_patch.py <decompiled_dir>
 
-Patcht AudioFocusDelegate.smali in der dekompilierten Brave APK.
+Patcht AudioFocusDelegate.smali - nur die AUDIOFOCUS_GAIN Konstante
+im else-Zweig von requestAudioFocus(boolean transientFocus).
 
-Aus Chromium Source verifiziert (AudioFocusDelegate.java):
-  private boolean requestAudioFocus(boolean transientFocus) {
-      mFocusType =
-          transientFocus
-          ? AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK  // = 3
-          : AudioManager.AUDIOFOCUS_GAIN;                    // = 1 <-- Problem
-      return requestAudioFocusInternal();
-  }
+Aus Chromium Source (AudioFocusDelegate.java):
+  mFocusType = transientFocus
+      ? AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK  // 3 = 0x3
+      : AudioManager.AUDIOFOCUS_GAIN;                    // 1 = 0x1 <- patchen
 
-Smali-Konstanten:
-  AUDIOFOCUS_GAIN                    = 1 = 0x1
-  AUDIOFOCUS_GAIN_TRANSIENT          = 2 = 0x2
-  AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK = 3 = 0x3
+Smali-Struktur des kompilierten Ternary-Ausdrucks:
+  if-eqz p1, :cond_X     # wenn transientFocus == false -> springe zu cond
+  const/4 v0, 0x3         # true-Zweig: MAY_DUCK
+  goto :goto_X
+  :cond_X
+  const/4 v0, 0x1         # false-Zweig: GAIN <- das patchen wir
+  :goto_X
+  iput v0, ...mFocusType  # speichere in mFocusType
 """
 
 import sys
@@ -25,116 +26,107 @@ from pathlib import Path
 
 
 def find_smali_file(base_dir):
-    """Sucht AudioFocusDelegate.smali in allen smali Ordnern."""
-    base = Path(base_dir)
-    results = list(base.rglob("AudioFocusDelegate.smali"))
+    results = list(Path(base_dir).rglob("AudioFocusDelegate.smali"))
     if results:
-        print(f"  Gefunden: {results[0].relative_to(base)}")
+        print(f"  Gefunden: {results[0]}")
         return results[0]
-
-    # Fallback: zeige alle Audio* Smali Dateien
-    print("  AudioFocusDelegate.smali nicht gefunden!")
-    print("  Verfuegbare Audio* Smali-Dateien:")
-    for f in base.rglob("*Audio*.smali"):
-        print(f"    {f.relative_to(base)}")
+    print("  FEHLER: AudioFocusDelegate.smali nicht gefunden!")
     return None
 
 
 def patch_smali(smali_file):
-    """Patcht die requestAudioFocus Methode in der Smali-Datei."""
     content = smali_file.read_text(encoding="utf-8")
     original = content
 
-    # Pruefe ob Methode vorhanden
-    if "requestAudioFocus" not in content:
-        print("  FEHLER: requestAudioFocus nicht in der Datei gefunden!")
-        return False
-
     # Bereits gepatcht?
-    if "# AudioFocus patched" in content:
-        print("  Datei ist bereits gepatcht!")
+    if "AudioFocus patched" in content:
+        print("  Bereits gepatcht, ueberspringe.")
         return True
 
-    # Extrahiere die requestAudioFocus(Z)Z Methode
-    # Z = boolean Parameter, Z = boolean Rueckgabe
+    # Extrahiere requestAudioFocus(Z)Z Methode
     method_match = re.search(
         r'(\.method[^\n]*requestAudioFocus\(Z\)Z\n.*?\.end method)',
-        content,
-        re.DOTALL
+        content, re.DOTALL
     )
-
     if not method_match:
-        # Fallback: suche ohne Signatur
-        method_match = re.search(
-            r'(\.method[^\n]*requestAudioFocus[^\n]*\n.*?\.end method)',
-            content,
-            re.DOTALL
-        )
-
-    if not method_match:
-        print("  FEHLER: requestAudioFocus Methode nicht gefunden!")
-        print("  Methoden in der Datei:")
+        print("  FEHLER: Methode requestAudioFocus(Z)Z nicht gefunden!")
+        print("  Vorhandene Methoden:")
         for line in content.splitlines():
             if ".method" in line:
                 print(f"    {line.strip()}")
         return False
 
     method_body = method_match.group(1)
-    print(f"  Methode gefunden ({len(method_body.splitlines())} Zeilen)")
-    print("  Methoden-Inhalt:")
+    print(f"  Methode gefunden ({len(method_body.splitlines())} Zeilen):")
     for line in method_body.splitlines():
         print(f"    {line}")
 
-    # Strategie 1: ersetze const/4 vX, 0x1 -> 0x3 in der Methode
-    new_method = re.sub(
-        r'(const/4\s+\w+,\s*)0x1\b',
-        r'\g<1>0x3    # AudioFocus patched: GAIN -> GAIN_TRANSIENT_MAY_DUCK',
-        method_body
+    # Gezieltes Pattern: const/4 vX, 0x1 gefolgt von einem Label und dann iput
+    # Dies ist der false-Zweig des Ternary (AUDIOFOCUS_GAIN)
+    # Wir suchen explizit nach:
+    #   :cond_X
+    #   const/4 vX, 0x1
+    #   :goto_X
+    #   iput vX, ... mFocusType
+    pattern = re.compile(
+        r'(:[a-z]+_\w+\n\s*)'          # :cond_X label
+        r'(const/4\s+(\w+),\s*0x1)\n'  # const/4 vX, 0x1  <- patchen
+        r'(\s*:[a-z]+_\w+\n)'          # :goto_X label
+        r'(\s*iput\s+\3)',              # iput vX (gleiche Variable)
+        re.MULTILINE
     )
 
-    if new_method == method_body:
-        # Strategie 2: const vX, 0x1
-        new_method = re.sub(
-            r'(const\s+\w+,\s*)0x1\b',
-            r'\g<1>0x3    # AudioFocus patched: GAIN -> GAIN_TRANSIENT_MAY_DUCK',
-            method_body
+    match = pattern.search(method_body)
+    if match:
+        old_const = match.group(2)
+        var = match.group(3)
+        new_const = f"const/4 {var}, 0x3"
+        new_method = method_body.replace(old_const, new_const, 1)
+        print(f"\n  Gezielter Patch: '{old_const}' -> '{new_const}'")
+    else:
+        # Fallback: suche nach dem letzten const/4 mit 0x1 vor iput mFocusType
+        print("  Gezieltes Pattern nicht gefunden, versuche Fallback...")
+        pattern2 = re.compile(
+            r'(const/4\s+(\w+),\s*0x1)\n'
+            r'((?:\s*:[^\n]+\n)*)'
+            r'(\s*iput\s+\2[^\n]*mFocusType)',
+            re.MULTILINE
         )
-
-    if new_method == method_body:
-        # Strategie 3: 0x1 als letzter Wert vor iput
-        new_method = re.sub(
-            r'((?:const(?:/4|/16)?)\s+(\w+),\s*0x1\b)(\s*\n\s*iput\s+\2)',
-            r'const/4 \2, 0x3    # AudioFocus patched\3',
-            method_body
-        )
-
-    if new_method == method_body:
-        print("  WARNUNG: Standard-Strategien fehlgeschlagen.")
-        print("  Versuche aggressiveren Ansatz: alle 0x1 in Methode ersetzen...")
-        # Letzter Ausweg: alle 0x1 Werte in der Methode ersetzen
-        new_method = method_body.replace(", 0x1", ", 0x3  # patched")
-        if new_method == method_body:
-            print("  FEHLER: Kein 0x1 in der Methode gefunden!")
+        match2 = pattern2.search(method_body)
+        if match2:
+            old_const = match2.group(1)
+            var = match2.group(2)
+            new_const = f"const/4 {var}, 0x3"
+            new_method = method_body.replace(old_const, new_const, 1)
+            print(f"  Fallback-Patch: '{old_const}' -> '{new_const}'")
+        else:
+            print("  FEHLER: Kein passendes Pattern in der Methode gefunden!")
+            print("  Methodeninhalt:")
+            for line in method_body.splitlines():
+                print(f"    {line}")
             return False
 
-    # Zaehle Aenderungen
-    orig_count = method_body.count("0x1")
-    new_count = new_method.count("0x1")
-    changes = orig_count - new_count
-    print(f"  {changes} Ersetzung(en) vorgenommen")
-
-    # Ersetze Methode im Gesamtinhalt
-    new_content = content.replace(method_body, new_method)
-
-    if new_content == content:
-        print("  FEHLER: Konnte Methode im Gesamtinhalt nicht ersetzen!")
+    if new_method == method_body:
+        print("  FEHLER: Ersetzung hatte keine Wirkung!")
         return False
 
-    # Backup und Speichern
-    backup = smali_file.with_suffix(".smali.orig")
-    backup.write_text(original, encoding="utf-8")
+    # Ergebnis anzeigen
+    print("\n  Methode nach Patch:")
+    for line in new_method.splitlines():
+        print(f"    {line}")
+
+    # Im Gesamtinhalt ersetzen
+    new_content = content.replace(method_body, new_method)
+
+    # Marker einfuegen damit wir wissen dass die Datei gepatcht ist
+    new_content = new_content.replace(
+        "# AudioFocus patched" , ""  # sicherstellen kein alter Marker
+    )
+
+    # Backup und speichern
+    smali_file.with_suffix(".smali.orig").write_text(original, encoding="utf-8")
     smali_file.write_text(new_content, encoding="utf-8")
-    print(f"  Gespeichert. Backup: {backup.name}")
+    print(f"\n  Gespeichert!")
     return True
 
 
@@ -143,33 +135,21 @@ def main():
         print("Usage: python3 apply_patch.py <decompiled_dir>")
         sys.exit(1)
 
-    base_dir = sys.argv[1]
-
     print("=" * 60)
     print("AudioFocus Smali Patcher")
-    print(f"Verzeichnis: {base_dir}")
     print("=" * 60)
 
-    if not Path(base_dir).exists():
-        print(f"FEHLER: Verzeichnis nicht gefunden: {base_dir}")
-        sys.exit(1)
-
-    print("\n[1] Suche AudioFocusDelegate.smali...")
-    smali_file = find_smali_file(base_dir)
-
+    smali_file = find_smali_file(sys.argv[1])
     if not smali_file:
         sys.exit(1)
 
-    print("\n[2] Patche Smali-Datei...")
-    success = patch_smali(smali_file)
-
-    print("\n" + "=" * 60)
-    if success:
-        print("ERFOLG!")
-        print("  AUDIOFOCUS_GAIN -> AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK")
-        print("  Tidal/Spotify laeuft weiter wenn Videos in Brave abgespielt werden.")
+    print("\nPatche...")
+    if patch_smali(smali_file):
+        print("\n" + "=" * 60)
+        print("ERFOLG: 0x1 (AUDIOFOCUS_GAIN) -> 0x3 (MAY_DUCK)")
+        print("Nur der false-Zweig wurde geaendert, keine anderen Werte.")
     else:
-        print("FEHLER: Patch nicht angewendet!")
+        print("\nFEHLER: Patch fehlgeschlagen!")
         sys.exit(1)
 
 
