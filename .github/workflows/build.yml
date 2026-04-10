@@ -1,1 +1,88 @@
+name: Brave Android - AudioFocus Patch Build
 
+on:
+  workflow_dispatch:  # Manuell starten per Knopfdruck auf GitHub
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360  # 6 Stunden max
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl python3 python3-pip nodejs npm \
+            build-essential libssl-dev pkg-config \
+            openjdk-17-jdk
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git ~/depot_tools
+          echo "$HOME/depot_tools" >> $GITHUB_PATH
+
+      - name: Clone brave-browser
+        run: |
+          git clone https://github.com/brave/brave-browser.git ~/brave-browser
+          cd ~/brave-browser
+          npm install
+
+      - name: Sync Brave + Chromium (Android)
+        run: |
+          cd ~/brave-browser
+          npm run sync -- --target_os=android --target_arch=arm64
+        env:
+          DEPOT_TOOLS_UPDATE: 0
+
+      - name: Install Android build deps
+        run: |
+          cd ~/brave-browser/src
+          ./build/install-build-deps.sh --android --no-prompt || true
+          yes | ~/brave-browser/src/third_party/android_sdk/public/cmdline-tools/latest/bin/sdkmanager --licenses || true
+
+      - name: Apply AudioFocus patch
+        run: |
+          cd ~/brave-browser
+          python3 $GITHUB_WORKSPACE/patches/apply_patch.py
+
+      - name: Build Brave for Android (arm64)
+        run: |
+          cd ~/brave-browser
+          npm run build -- Release \
+            --target_os=android \
+            --target_arch=arm64 \
+            --target_android_output_format=apk
+        env:
+          JAVA_OPTS: "-Xmx10G -Xms1G"
+
+      - name: Find and collect APK
+        run: |
+          find ~/brave-browser/src/out -name "*.apk" | head -20
+          mkdir -p /tmp/brave-output
+          find ~/brave-browser/src/out -name "Brave*.apk" -exec cp {} /tmp/brave-output/ \;
+          ls -lh /tmp/brave-output/
+
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: brave-audiofocus-patched
+          path: /tmp/brave-output/*.apk
+          retention-days: 7
