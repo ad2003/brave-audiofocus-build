@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       brave_version:
-        description: 'Brave Version z.B. v1.89.132 (leer = neueste)'
+        description: 'Brave Version z.B. v1.89.132 (leer = neueste stable)'
         required: false
         default: ''
 
@@ -22,7 +22,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y wget curl unzip python3 openjdk-17-jdk
           java -version
-          python3 --version
 
       - name: Download apktool
         run: |
@@ -48,38 +47,32 @@ jobs:
       - name: Download Brave APK
         run: |
           VERSION="${BRAVE_VERSION}"
-          # Brave hostet APKs direkt unter diesem URL-Schema
-          BASE_URL="https://github.com/brave/brave-browser/releases/download/${VERSION}"
+          BASE="https://github.com/brave/brave-browser/releases/download/${VERSION}"
 
-          # Versuche bekannte Dateinamen der Reihe nach
-          for FILENAME in \
-            "Bravearm64Universal.apk" \
-            "BraveMonoarm64.apk" \
-            "brave-arm64-universal.apk" \
-            "brave-android-arm64-universal.apk"; do
-            URL="${BASE_URL}/${FILENAME}"
+          # Alle bekannten arm64 APK Dateinamen laut Brave Wiki
+          FILENAMES=(
+            "Bravearm64Universal.apk"
+            "BraveMonoarm64.apk"
+          )
+
+          SUCCESS=false
+          for FILENAME in "${FILENAMES[@]}"; do
+            URL="${BASE}/${FILENAME}"
             echo "Versuche: $URL"
-            if wget -q --spider "$URL" 2>/dev/null; then
-              echo "Gefunden: $FILENAME"
-              wget -q --show-progress "$URL" -O brave_original.apk
+            HTTP_CODE=$(curl -s -o brave_original.apk -w "%{http_code}" -L "$URL")
+            if [ "$HTTP_CODE" = "200" ] && [ -s brave_original.apk ]; then
+              echo "Erfolgreich: $FILENAME ($HTTP_CODE)"
+              SUCCESS=true
               break
+            else
+              echo "Nicht gefunden: $FILENAME ($HTTP_CODE)"
+              rm -f brave_original.apk
             fi
           done
 
-          if [ ! -f brave_original.apk ] || [ ! -s brave_original.apk ]; then
-            echo "Keiner der bekannten Dateinamen hat funktioniert."
-            echo "Versuche Release-Seite zu parsen..."
-            # Hole alle Asset-Links direkt von der Release-Seite
-            curl -sf "https://github.com/brave/brave-browser/releases/expanded_assets/${VERSION}" \
-              | grep -oP 'href="[^"]*\.apk"' \
-              | grep -i arm64 \
-              | head -1 \
-              | grep -oP '(?<=href=")[^"]*' \
-              | xargs -I{} wget -q --show-progress "https://github.com{}" -O brave_original.apk || true
-          fi
-
-          if [ ! -f brave_original.apk ] || [ ! -s brave_original.apk ]; then
-            echo "FEHLER: APK konnte nicht heruntergeladen werden!"
+          if [ "$SUCCESS" = false ]; then
+            echo "FEHLER: Keine APK heruntergeladen!"
+            echo "Bitte Version manuell angeben beim Workflow-Start"
             exit 1
           fi
 
@@ -88,9 +81,9 @@ jobs:
 
       - name: Decompile APK
         run: |
-          java -jar apktool.jar d brave_original.apk -o brave_decompiled -f 2>&1
+          java -jar apktool.jar d brave_original.apk -o brave_decompiled -f
           echo "Suche AudioFocusDelegate.smali:"
-          find brave_decompiled -name "AudioFocusDelegate.smali" 2>/dev/null
+          find brave_decompiled -name "AudioFocusDelegate.smali"
 
       - name: Apply AudioFocus patch
         run: |
@@ -98,10 +91,10 @@ jobs:
 
       - name: Recompile APK
         run: |
-          java -jar apktool.jar b brave_decompiled -o brave_patched_unsigned.apk 2>&1
+          java -jar apktool.jar b brave_decompiled -o brave_patched_unsigned.apk
           ls -lh brave_patched_unsigned.apk
 
-      - name: Create output directory and sign APK
+      - name: Sign APK
         run: |
           mkdir -p output
           java -jar uber-apk-signer.jar \
@@ -115,7 +108,6 @@ jobs:
           cd output
           for f in *.apk; do
             mv "$f" "brave-${BRAVE_VERSION}-audiofocus-patched.apk"
-            echo "Fertig: brave-${BRAVE_VERSION}-audiofocus-patched.apk"
           done
           ls -lh
 
