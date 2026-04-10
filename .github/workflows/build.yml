@@ -25,8 +25,8 @@ jobs:
 
       - name: Download baksmali and smali
         run: |
-          wget -q "https://github.com/JesusFreke/smali/releases/download/v2.5.2/baksmali-2.5.2.jar" -O baksmali.jar
-          wget -q "https://github.com/JesusFreke/smali/releases/download/v2.5.2/smali-2.5.2.jar" -O smali.jar
+          wget -q "https://github.com/baksmali/smali/releases/download/v3.0.9/baksmali-3.0.9-fat-release.jar" -O baksmali.jar
+          wget -q "https://github.com/baksmali/smali/releases/download/v3.0.9/smali-3.0.9-fat-release.jar" -O smali.jar
           ls -lh baksmali.jar smali.jar
 
       - name: Download uber-apk-signer
@@ -63,36 +63,31 @@ jobs:
       - name: Extract APK
         run: |
           mkdir -p apk_extracted
-          cp brave_original.apk apk_extracted/
           cd apk_extracted
-          unzip -q brave_original.apk
-          rm brave_original.apk
-          echo "APK Inhalt:"
-          ls -lh
+          unzip -q ../brave_original.apk
           echo "DEX Dateien:"
-          ls -lh *.dex 2>/dev/null || echo "Keine .dex im Root"
-          find . -name "*.dex" | head -10
+          ls -lh *.dex 2>/dev/null || find . -name "*.dex" | head -10
 
-      - name: Find and patch AudioFocusDelegate in DEX
+      - name: Patch AudioFocusDelegate in DEX
         run: |
           python3 patches/apply_patch.py apk_extracted
 
-      - name: Repackage APK (preserving .so compression)
+      - name: Repackage APK
         run: |
           cd apk_extracted
-          # Erstelle neue APK - .so Dateien UNCOMPRESSED (STORE), Rest normal
-          zip -r -0 ../brave_patched_unaligned.apk lib/ 2>/dev/null || true
-          # Alle anderen Dateien normal komprimiert hinzufuegen
-          find . -not -path './lib/*' -not -path '.' -type f | \
-            zip -r ../brave_patched_unaligned.apk -@
+          # .so Dateien UNCOMPRESSED (store) - kritisch fuer Android!
+          zip -r -0 ../brave_patched.apk lib/ 2>/dev/null || true
+          # Alles andere normal komprimiert
+          find . -not -path './lib/*' -not -path '.' -type f \
+            | zip ../brave_patched.apk -@
           cd ..
-          ls -lh brave_patched_unaligned.apk
+          ls -lh brave_patched.apk
 
       - name: Sign APK
         run: |
           mkdir -p output
           java -jar uber-apk-signer.jar \
-            --apks brave_patched_unaligned.apk \
+            --apks brave_patched.apk \
             --allowResign \
             --out output
           ls -lh output/
