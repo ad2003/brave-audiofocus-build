@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       brave_version:
-        description: 'Brave Version z.B. v1.89.132 (leer = neueste stable)'
+        description: 'Brave Version z.B. v1.89.135 (leer = neueste stable)'
         required: false
         default: ''
 
@@ -17,7 +17,7 @@ jobs:
       - name: Checkout this repo
         uses: actions/checkout@v4
 
-      - name: Install Java and tools
+      - name: Install tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y wget curl unzip python3 openjdk-17-jdk
@@ -25,7 +25,7 @@ jobs:
 
       - name: Download apktool
         run: |
-          wget -q "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar" -O apktool.jar
+          wget -q "https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar" -O apktool.jar
           ls -lh apktool.jar
 
       - name: Download uber-apk-signer
@@ -38,8 +38,7 @@ jobs:
           if [ -n "${{ github.event.inputs.brave_version }}" ]; then
             VERSION="${{ github.event.inputs.brave_version }}"
           else
-            VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases/latest" \
-              | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+            VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases/latest" | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
           fi
           echo "Brave Version: $VERSION"
           echo "BRAVE_VERSION=$VERSION" >> $GITHUB_ENV
@@ -47,35 +46,22 @@ jobs:
       - name: Download Brave APK
         run: |
           VERSION="${BRAVE_VERSION}"
-          BASE="https://github.com/brave/brave-browser/releases/download/${VERSION}"
-
-          SUCCESS=false
-          for FILENAME in "Bravearm64Universal.apk" "BraveMonoarm64.apk"; do
-            URL="${BASE}/${FILENAME}"
-            echo "Versuche: ${URL}"
-            HTTP_CODE=$(curl -s -o brave_original.apk -w "%{http_code}" -L "${URL}")
-            if [ "$HTTP_CODE" = "200" ] && [ -s brave_original.apk ]; then
-              echo "Erfolgreich: ${FILENAME}"
-              SUCCESS=true
-              break
-            else
-              echo "Nicht gefunden: ${FILENAME} (HTTP ${HTTP_CODE})"
-              rm -f brave_original.apk
-            fi
-          done
-
-          if [ "$SUCCESS" = false ]; then
-            echo "FEHLER: Keine APK heruntergeladen!"
-            echo "Bitte Version manuell angeben beim Workflow-Start"
+          APK_PATH=$(curl -sL "https://github.com/brave/brave-browser/releases/expanded_assets/${VERSION}" \
+            | grep -oP '(?<=href=")[^"]*\.apk' \
+            | grep -i "arm64" \
+            | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "FEHLER: Keine arm64 APK fuer ${VERSION} gefunden!"
             exit 1
           fi
-
+          APK_URL="https://github.com${APK_PATH}"
+          echo "Download: ${APK_URL}"
+          curl -L --output brave_original.apk "${APK_URL}"
           ls -lh brave_original.apk
-          file brave_original.apk
 
       - name: Decompile APK
         run: |
-          java -jar apktool.jar d brave_original.apk -o brave_decompiled -f
+          java -jar apktool.jar d brave_original.apk -o brave_decompiled -f --only-main-classes
           echo "Suche AudioFocusDelegate.smali:"
           find brave_decompiled -name "AudioFocusDelegate.smali"
 
@@ -85,7 +71,7 @@ jobs:
 
       - name: Recompile APK
         run: |
-          java -jar apktool.jar b brave_decompiled -o brave_patched_unsigned.apk
+          java -jar apktool.jar b brave_decompiled -o brave_patched_unsigned.apk --use-aapt2
           ls -lh brave_patched_unsigned.apk
 
       - name: Sign APK
