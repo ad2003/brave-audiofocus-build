@@ -2,96 +2,137 @@
 """
 apply_patch.py <apk_extracted_dir>
 
-Neuer Ansatz: Patcht DEX direkt mit baksmali/smali.
-- Kein apktool recompile
-- .so Dateien werden nicht angeruehrt
-- Nur die eine DEX-Datei die AudioFocusDelegate enthaelt wird ersetzt
+Direkter Binary-Patch auf DEX-Datei.
+Kein baksmali/smali noetig - nur Python!
+
+DEX Bytecode:
+  const/4 vX, 0x1 = [0x12, (0x10 | X)]  X=Register, 1=Wert
+  const/4 vX, 0x3 = [0x12, (0x30 | X)]  X=Register, 3=Wert
+
+Wir suchen in der requestAudioFocus Methode von AudioFocusDelegate
+nach const/4 vX, 0x1 und aendern es zu const/4 vX, 0x3.
 """
 
 import sys
-import re
-import os
-import subprocess
+import struct
+import zlib
 from pathlib import Path
 
 
-def run(cmd, check=True):
-    print(f"  $ {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr)
-    if check and result.returncode != 0:
-        print(f"  FEHLER: Exit code {result.returncode}")
-        sys.exit(1)
-    return result
+def fix_dex_checksum(data: bytearray) -> bytearray:
+    """Aktualisiert SHA1 Signature und Adler32 Checksum in DEX Header."""
+    import hashlib
+    # SHA1 ueber bytes ab offset 32 (nach magic + checksum + signature)
+    sha1 = hashlib.sha1(data[32:]).digest()
+    data[12:32] = sha1
+    # Adler32 ueber bytes ab offset 12 (nach magic + checksum)
+    adler = zlib.adler32(bytes(data[12:])) & 0xFFFFFFFF
+    struct.pack_into('<I', data, 8, adler)
+    return data
 
 
-def find_dex_with_class(apk_dir):
-    """Findet welche DEX-Datei AudioFocusDelegate enthaelt."""
-    apk = Path(apk_dir)
-    dex_files = sorted(apk.glob("*.dex"))
-    print(f"  DEX-Dateien: {[d.name for d in dex_files]}")
-
-    for dex in dex_files:
-        # Suche nach dem Klassennamen im Binaerinhalt
-        content = dex.read_bytes()
-        if b"AudioFocusDelegate" in content:
-            print(f"  AudioFocusDelegate gefunden in: {dex.name}")
-            return dex
-
-    print("  FEHLER: AudioFocusDelegate in keiner DEX-Datei gefunden!")
-    return None
+def find_string_offset(dex_data: bytes, target: str) -> list:
+    """Findet alle Vorkommen eines Strings in DEX."""
+    encoded = target.encode('utf-8')
+    offsets = []
+    start = 0
+    while True:
+        pos = dex_data.find(encoded, start)
+        if pos == -1:
+            break
+        offsets.append(pos)
+        start = pos + 1
+    return offsets
 
 
-def patch_smali(smali_file):
-    """Patcht die requestAudioFocus Methode."""
-    content = smali_file.read_text(encoding="utf-8")
-    original = content
+def patch_dex(dex_path: Path) -> bool:
+    """Patcht const/4 vX, 0x1 -> 0x3 in requestAudioFocus Methode."""
+    data = bytearray(dex_path.read_bytes())
+    original = bytes(data)
 
-    print(f"\n  Patche: {smali_file}")
+    print(f"\n  DEX: {dex_path.name} ({len(data):,} bytes)")
 
-    # Extrahiere requestAudioFocus(Z)Z Methode
-    method_match = re.search(
-        r'(\.method[^\n]*requestAudioFocus\(Z\)Z\n.*?\.end method)',
-        content, re.DOTALL
-    )
-    if not method_match:
-        print("  FEHLER: Methode nicht gefunden!")
+    # Prüfe ob AudioFocusDelegate ueberhaupt in dieser DEX ist
+    if b"AudioFocusDelegate" not in data:
+        print("  AudioFocusDelegate nicht in dieser DEX")
         return False
 
-    method_body = method_match.group(1)
-    print("\n  Methode:")
-    for line in method_body.splitlines():
-        print(f"    {line}")
+    print("  AudioFocusDelegate gefunden!")
 
-    # Ersetze ALLE const/4 vX, 0x1 in der Methode -> 0x3
-    # (sicher weil 0x1 hier nur AUDIOFOCUS_GAIN sein kann)
-    new_method = re.sub(
-        r'(const/4\s+\w+,\s*)0x1\b',
-        r'\g<1>0x3',
-        method_body
-    )
-
-    if new_method == method_body:
-        print("  Kein 0x1 gefunden - versuche andere Konstanten-Formate...")
-        new_method = re.sub(
-            r'(const\s+\w+,\s*)0x1\b',
-            r'\g<1>0x3',
-            method_body
-        )
-
-    if new_method == method_body:
-        print("  FEHLER: Kein passendes Pattern!")
+    # Finde "requestAudioFocus" String-Referenz in DEX
+    offsets = find_string_offset(data, "requestAudioFocus")
+    if not offsets:
+        print("  'requestAudioFocus' String nicht gefunden!")
         return False
 
-    print("\n  Nach Patch:")
-    for line in new_method.splitlines():
-        print(f"    {line}")
+    print(f"  'requestAudioFocus' gefunden an {len(offsets)} Stelle(n)")
 
-    new_content = content.replace(method_body, new_method)
-    smali_file.write_text(new_content, encoding="utf-8")
+    # Suche im Bereich um den String nach const/4 vX, 0x1
+    # const/4 Opcode = 0x12, dann ein Byte mit (value<<4 | register)
+    # 0x1 als value: zweites Byte hat Form 0x1X (upper nibble = 1)
+    
+    patches_applied = 0
+    search_radius = 2000  # Bytes um den String herum suchen
+
+    for str_offset in offsets:
+        # Suche in einem Bereich um den String
+        search_start = max(0, str_offset - search_radius)
+        search_end = min(len(data), str_offset + search_radius)
+        region = data[search_start:search_end]
+
+        # Finde alle const/4 vX, 0x1 Instruktionen (0x12 gefolgt von 0x1X)
+        i = 0
+        while i < len(region) - 1:
+            if region[i] == 0x12:  # const/4 opcode
+                second_byte = region[i + 1]
+                value_nibble = (second_byte >> 4) & 0xF   # oberes Nibble = Wert
+                reg_nibble = second_byte & 0xF             # unteres Nibble = Register
+
+                if value_nibble == 0x1:  # AUDIOFOCUS_GAIN = 1
+                    abs_offset = search_start + i
+                    print(f"  const/4 v{reg_nibble}, 0x1 gefunden @ offset {abs_offset} (0x{abs_offset:x})")
+
+                    # Aendere zu const/4 vX, 0x3 (AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    new_byte = (0x3 << 4) | reg_nibble
+                    data[abs_offset + 1] = new_byte
+                    patches_applied += 1
+                    print(f"  -> const/4 v{reg_nibble}, 0x3 (gepatcht!)")
+            i += 1
+
+    if patches_applied == 0:
+        print("  Keine const/4 vX, 0x1 Instruktionen in der Naehe gefunden!")
+        print("  Versuche breiteren Suchradius (5000 bytes)...")
+        
+        for str_offset in offsets:
+            search_start = max(0, str_offset - 5000)
+            search_end = min(len(data), str_offset + 5000)
+            region = data[search_start:search_end]
+            i = 0
+            while i < len(region) - 1:
+                if region[i] == 0x12:
+                    second_byte = region[i + 1]
+                    value_nibble = (second_byte >> 4) & 0xF
+                    reg_nibble = second_byte & 0xF
+                    if value_nibble == 0x1:
+                        abs_offset = search_start + i
+                        new_byte = (0x3 << 4) | reg_nibble
+                        data[abs_offset + 1] = new_byte
+                        patches_applied += 1
+                        print(f"  const/4 v{reg_nibble}, 0x1 @ {abs_offset} -> 0x3")
+                i += 1
+
+    if patches_applied == 0:
+        print("  FEHLER: Keine Patches angewendet!")
+        return False
+
+    # DEX Checksum aktualisieren
+    print(f"\n  {patches_applied} Patch(es) angewendet. Aktualisiere Checksum...")
+    data = fix_dex_checksum(data)
+
+    # Speichern
+    dex_path.with_suffix(".dex.orig").write_bytes(original)
+    dex_path.write_bytes(data)
+    print(f"  Gespeichert! (Backup: {dex_path.stem}.dex.orig)")
     return True
 
 
@@ -101,54 +142,31 @@ def main():
         sys.exit(1)
 
     apk_dir = Path(sys.argv[1])
-    work_dir = Path("/tmp/audiofocus_patch")
-    work_dir.mkdir(exist_ok=True)
-
     print("=" * 60)
-    print("AudioFocus DEX Patcher")
+    print("AudioFocus DEX Binary Patcher")
     print("=" * 60)
 
-    # 1. Finde DEX mit AudioFocusDelegate
-    print("\n[1] Suche DEX-Datei...")
-    dex_file = find_dex_with_class(apk_dir)
-    if not dex_file:
-        sys.exit(1)
+    # Finde alle DEX Dateien
+    dex_files = sorted(apk_dir.glob("*.dex"))
+    if not dex_files:
+        # Auch in Unterordnern suchen
+        dex_files = sorted(apk_dir.rglob("*.dex"))
 
-    # 2. Dekompiliere DEX mit baksmali
-    print(f"\n[2] Dekompiliere {dex_file.name} mit baksmali...")
-    smali_out = work_dir / "smali_out"
-    smali_out.mkdir(exist_ok=True)
-    run(["java", "-jar", "baksmali.jar", "d",
-         str(dex_file), "-o", str(smali_out)])
+    print(f"\nDEX Dateien: {[d.name for d in dex_files]}")
 
-    # 3. Finde und patche AudioFocusDelegate.smali
-    print("\n[3] Suche AudioFocusDelegate.smali...")
-    results = list(smali_out.rglob("AudioFocusDelegate.smali"))
-    if not results:
-        print("  FEHLER: AudioFocusDelegate.smali nicht gefunden!")
-        sys.exit(1)
-
-    smali_file = results[0]
-    print(f"  Gefunden: {smali_file.relative_to(smali_out)}")
-
-    if not patch_smali(smali_file):
-        sys.exit(1)
-
-    # 4. Rekompiliere DEX mit smali
-    print(f"\n[4] Rekompiliere zu DEX...")
-    new_dex = work_dir / dex_file.name
-    run(["java", "-jar", "smali.jar", "a",
-         str(smali_out), "-o", str(new_dex)])
-
-    # 5. Ersetze originale DEX in APK-Verzeichnis
-    print(f"\n[5] Ersetze {dex_file.name}...")
-    import shutil
-    shutil.copy2(new_dex, dex_file)
-    print(f"  {dex_file.name} ersetzt!")
+    patched = False
+    for dex in dex_files:
+        if patch_dex(dex):
+            patched = True
+            break  # Nur eine DEX muss gepatcht werden
 
     print("\n" + "=" * 60)
-    print("ERFOLG: AudioFocus Patch angewendet!")
-    print("AUDIOFOCUS_GAIN (0x1) -> AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK (0x3)")
+    if patched:
+        print("ERFOLG!")
+        print("AUDIOFOCUS_GAIN (0x1) -> AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK (0x3)")
+    else:
+        print("FEHLER: Patch nicht angewendet!")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
