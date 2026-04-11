@@ -1,77 +1,44 @@
-# Brave AudioFocus Build
+Brave AudioFocus Patcher
+Patches the Brave Android APK so that Spotify, Tidal, and other music apps keep playing when a video starts in Brave.
+The Problem
+Brave requests AUDIOFOCUS_GAIN whenever a video starts playing (including autoplay and inline videos while scrolling). This forces other audio apps to stop completely — not duck, not pause temporarily, just stop.
+The Fix
+A single byte patch in the DEX disables all AudioManager.requestAudioFocus() calls:
+BEFORE: video starts in Brave → AUDIOFOCUS_GAIN → Spotify/Tidal STOP
 
-Patcht Brave Browser fuer Android so dass Videos mit Ton spielen koennen
-waehrend Tidal/Spotify gleichzeitig weiterlaeuft.
+AFTER:  video starts in Brave → no focus request → Spotify/Tidal keep playing
+Brave still plays audio normally. Android does not enforce audio focus — it's a cooperative system. By not requesting focus, Brave never sends an AUDIOFOCUS_LOSS event to other apps.
 
-**Aenderung:** AUDIOFOCUS_GAIN -> AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+Note: Simply switching to AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK is not enough. Apps like Tidal and Spotify use setPauseWhenDucked(true) internally and will pause regardless.
 
----
+Usage
+Option A — GitHub Actions (recommended, no setup needed)
 
-## Schritt-fuer-Schritt Anleitung
+Fork this repo
+Go to Actions → Brave AudioFocus APK Patcher → Run workflow
+Leave the version field empty (= latest stable) or enter a specific version like v1.89.135
+Download the APK from the Artifacts section after ~2 minutes
 
-### 1. Dieses Repository auf GitHub erstellen
+Option B — Run locally
+bash# Patch the APK
+python3 patches/audiofocus_patch_precise.py BraveAndroid.apk brave_patched.apk
 
-1. Gehe zu https://github.com/new
-2. Repository Name: `brave-audiofocus-build`
-3. Sichtbarkeit: **Private** (empfohlen)
-4. Klicke "Create repository"
+# Align and sign
+zipalign -p -f 4 brave_patched.apk brave_aligned.apk
+apksigner sign --ks your.jks --out brave_signed.apk brave_aligned.apk
+Installation
 
-### 2. Dateien hochladen
+⚠️ Brave must be fully uninstalled before installing the patched APK.
+The patched APK uses a different signing key, so Play Store updates won't work.
+Back up your Brave data with Brave Sync first!
 
-Lade alle Dateien aus diesem Ordner in dein neues Repository hoch:
-- `.github/workflows/build.yml`  (wichtig: dieser Pfad muss exakt stimmen!)
-- `patches/apply_patch.py`
-- `README.md`
+bashadb uninstall com.brave.browser
+adb install brave_signed.apk
+Or copy the APK to your device and open it directly (requires "Install unknown apps" enabled).
+How It Works
+The patcher opens the APK as a ZIP, finds every invoke-virtual AudioManager->requestAudioFocus() instruction in the DEX bytecode, and replaces it with a no-op (const/4 vX, 0x1 = AUDIOFOCUS_REQUEST_GRANTED + nops). All other files in the APK are copied with their original compression settings — no repackaging.
+Caveats
 
-Am einfachsten per GitHub Web-Interface:
-- "Add file" -> "Upload files"
-- Achte darauf dass `.github/workflows/build.yml` im richtigen Unterordner landet
-
-### 3. Build starten
-
-1. Gehe zu deinem Repository auf GitHub
-2. Klicke auf den Tab "Actions"
-3. Klicke auf "Brave Android - AudioFocus Patch Build" in der linken Liste
-4. Klicke den Button "Run workflow"
-5. Nochmal "Run workflow" bestaetigen
-
-### 4. Warten (~3-6 Stunden)
-
-GitHub baut Brave in der Cloud. Du kannst den Fortschritt live unter
-dem "Actions" Tab verfolgen.
-
-### 5. APK herunterladen
-
-Nach erfolgreichem Build:
-1. Klicke auf den fertigen Workflow-Run
-2. Scrolle nach unten zu "Artifacts"
-3. Lade `brave-audiofocus-patched` herunter
-4. ZIP entpacken -> APK-Datei
-
-### 6. APK installieren
-
-```
-# Brave zuerst deinstallieren (wegen anderem Signatur-Key)
-adb install brave-audiofocus-patched.apk
-```
-
-Oder: APK-Datei aufs Handy kopieren und dort installieren
-(Einstellungen -> "Unbekannte Quellen" muss erlaubt sein)
-
----
-
-## Hinweise
-
-- GitHub Actions ist fuer Public Repos kostenlos und unbegrenzt
-- Fuer Private Repos: 2.000 Minuten/Monat gratis (reicht fuer ~1 Build/Monat)
-- Bei jedem Brave-Update: Workflow einfach erneut starten
-- Der Build dauert beim ersten Mal laenger (kein Cache)
-
----
-
-## Falls der Build fehlschlaegt
-
-Haeufige Ursachen:
-1. Disk Space zu knapp auf GitHub Runner -> selten, normalerweise 14 GB frei
-2. Sync-Fehler -> Workflow nochmal starten
-3. Patch nicht angewendet -> Chromium hat Code umstrukturiert, melde dich!
+Play Store auto-updates won't work (different signing key) — re-run the Action after each Brave update
+Hardware media keys (headphone play/pause) may no longer control Brave video playback
+Only tested on arm64 devices
