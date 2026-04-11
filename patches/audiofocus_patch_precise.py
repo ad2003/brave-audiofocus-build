@@ -2,8 +2,18 @@
 """
 audiofocus_patch_precise.py <input.apk> [output.apk]
 
-Patcht ALLE Aufrufe von AudioManager.requestAudioFocus() im DEX zu No-Ops.
--> Tidal/Spotify bekommen kein AUDIOFOCUS_LOSS -> laufen weiter.
+Patches all AudioManager.requestAudioFocus() calls in the Brave DEX to no-ops.
+Works directly inside the APK ZIP — no extract/repack needed.
+
+How it works:
+  Parses the DEX string pool and method table to find every method_id
+  named 'requestAudioFocus', then scans the bytecode for invoke-virtual
+  instructions referencing those method_ids and replaces them with:
+    const/4 vX, 0x1  (= AUDIOFOCUS_REQUEST_GRANTED)
+    nop nop nop
+
+  Result: Brave thinks it has audio focus and plays audio normally,
+  but never actually notifies Android — so Tidal/Spotify keep playing.
 """
 
 import sys, struct, zlib, hashlib, zipfile
@@ -11,6 +21,7 @@ from pathlib import Path
 
 
 def fix_dex_checksum(data: bytearray):
+    """Update SHA1 signature and Adler32 checksum in the DEX header."""
     sha1 = hashlib.sha1(bytes(data[32:])).digest()
     data[12:32] = sha1
     adler = zlib.adler32(bytes(data[12:])) & 0xFFFFFFFF
@@ -18,6 +29,7 @@ def fix_dex_checksum(data: bytearray):
 
 
 def read_uleb128(data, offset):
+    """Read a ULEB128-encoded integer, return (value, new_offset)."""
     result, shift = 0, 0
     while True:
         b = data[offset]; offset += 1
@@ -28,6 +40,7 @@ def read_uleb128(data, offset):
 
 
 def parse_strings(data):
+    """Return all strings from the DEX string pool."""
     size = struct.unpack_from('<I', data, 56)[0]
     off  = struct.unpack_from('<I', data, 60)[0]
     strings = []
@@ -39,113 +52,111 @@ def parse_strings(data):
 
 
 def parse_type_ids(data):
+    """Return all type descriptor string indices."""
     size = struct.unpack_from('<I', data, 64)[0]
     off  = struct.unpack_from('<I', data, 68)[0]
     return [struct.unpack_from('<I', data, off + i*4)[0] for i in range(size)]
 
 
 def parse_method_ids(data):
+    """Return all method_ids as (class_idx, proto_idx, name_idx) tuples."""
     size = struct.unpack_from('<I', data, 88)[0]
     off  = struct.unpack_from('<I', data, 92)[0]
     methods = []
     for i in range(size):
         o = off + i*8
         methods.append((
-            struct.unpack_from('<H', data, o)[0],    # class_idx
-            struct.unpack_from('<H', data, o+2)[0],  # proto_idx
-            struct.unpack_from('<H', data, o+4)[0],  # name_idx
+            struct.unpack_from('<H', data, o)[0],
+            struct.unpack_from('<H', data, o+2)[0],
+            struct.unpack_from('<H', data, o+4)[0],
         ))
     return methods
 
 
 def find_all_audiofocus_method_ids(data: bytes) -> list:
     """
-    Findet ALLE method_ids die 'requestAudioFocus' heissen
-    und zu Android AudioManager oder anderen Audio-Klassen gehören.
-    Gibt Liste von method_id Indizes zurück.
+    Find all method_id indices where the method name is 'requestAudioFocus'.
+    Returns a list of indices (usually one per class that has this method).
     """
     strings  = parse_strings(data)
     type_ids = parse_type_ids(data)
     methods  = parse_method_ids(data)
 
-    # Alle String-Indices die 'requestAudioFocus' heissen
-    raf_name_indices = {i for i, s in enumerate(strings) if s == 'requestAudioFocus'}
-    if not raf_name_indices:
-        print("    'requestAudioFocus' nicht im String Pool!")
+    raf_indices = {i for i, s in enumerate(strings) if s == 'requestAudioFocus'}
+    if not raf_indices:
         return []
 
-    print(f"    'requestAudioFocus' Strings: indices {raf_name_indices}")
-
-    # Alle method_ids mit diesem Namen finden (egal welche Klasse)
     result = []
     for i, (class_idx, proto_idx, name_idx) in enumerate(methods):
-        if name_idx in raf_name_indices:
+        if name_idx in raf_indices:
             class_str = strings[type_ids[class_idx]] if class_idx < len(type_ids) else "?"
             print(f"    method_id {i}: {class_str}->requestAudioFocus")
             result.append(i)
-
     return result
 
 
 def patch_dex(dex_data: bytes) -> tuple:
+    """
+    Find and patch all invoke-virtual calls to requestAudioFocus() in this DEX.
+    Returns (patched_bytes, number_of_patches_applied).
+
+    DEX invoke-virtual format (35c): 6 bytes
+      0x6e [arg_count] [method_idx_lo] [method_idx_hi] [regs] [regs]
+    Followed by move-result vX: 2 bytes
+      0x0a [register]
+
+    Replacement (8 bytes total):
+      const/4 vX, 0x1  →  0x12 (0x10|reg)   = AUDIOFOCUS_REQUEST_GRANTED
+      nop              →  0x00 0x00
+      nop              →  0x00 0x00
+      nop              →  0x00 0x00  (replaces move-result)
+    """
     data = bytearray(dex_data)
 
-    if b'AudioFocusDelegate' not in data and b'requestAudioFocus' not in data:
+    if b'requestAudioFocus' not in data:
         return bytes(data), 0
-
-    if b'AudioFocusDelegate' in data:
-        print("    ✓ AudioFocusDelegate gefunden")
 
     method_ids = find_all_audiofocus_method_ids(bytes(data))
     if not method_ids:
         return bytes(data), 0
 
-    total_patches = 0
-
+    total = 0
     for method_idx in method_ids:
-        method_idx_lo = method_idx & 0xFF
-        method_idx_hi = (method_idx >> 8) & 0xFF
-
-        # Finde ALLE invoke-virtual Calls zu diesem method_idx
+        lo = method_idx & 0xFF
+        hi = (method_idx >> 8) & 0xFF
         i = 0
         while i < len(data) - 7:
-            if data[i] == 0x6e and \
-               data[i+2] == method_idx_lo and \
-               data[i+3] == method_idx_hi and \
-               data[i+6] == 0x0a:  # move-result direkt danach
+            if (data[i]   == 0x6e and   # invoke-virtual opcode
+                data[i+2] == lo    and   # method_idx low byte
+                data[i+3] == hi    and   # method_idx high byte
+                data[i+6] == 0x0a):      # move-result directly after
 
                 reg = data[i+7] & 0xF
-                const_byte = (0x1 << 4) | reg
+                print(f"    PATCH @ 0x{i:08x}: invoke-virtual → const/4 v{reg}, 0x1 + nops")
 
-                print(f"    PATCH @ 0x{i:08x}: invoke-virtual(method {method_idx}) → const/4 v{reg}, 0x1 + nops")
+                # Replace invoke-virtual (6 bytes) with const/4 vX, 0x1 + nops
+                data[i:i+6] = bytes([0x12, (0x1 << 4) | reg, 0x00, 0x00, 0x00, 0x00])
+                # Replace move-result (2 bytes) with nop
+                data[i+6:i+8] = b'\x00\x00'
 
-                # invoke-virtual (6 bytes) → const/4 vX, 0x1 + nop + nop
-                data[i+0] = 0x12
-                data[i+1] = const_byte
-                data[i+2] = 0x00
-                data[i+3] = 0x00
-                data[i+4] = 0x00
-                data[i+5] = 0x00
-                # move-result → nop
-                data[i+6] = 0x00
-                data[i+7] = 0x00
-
-                total_patches += 1
+                total += 1
                 i += 8
             else:
                 i += 1
 
-    if total_patches == 0:
-        return bytes(data), 0
+    if total:
+        fix_dex_checksum(data)
 
-    fix_dex_checksum(data)
-    return bytes(data), total_patches
+    return bytes(data), total
 
 
 def patch_apk(input_apk: Path, output_apk: Path) -> bool:
-    print(f"  Input:  {input_apk} ({input_apk.stat().st_size/1024/1024:.1f} MB)")
-
+    """
+    Open the APK as a ZIP, patch each DEX file in-place,
+    and write the result preserving original compression for all entries.
+    """
     total = 0
+
     with zipfile.ZipFile(input_apk, 'r') as zin, \
          zipfile.ZipFile(output_apk, 'w', allowZip64=True) as zout:
 
@@ -153,16 +164,16 @@ def patch_apk(input_apk: Path, output_apk: Path) -> bool:
             data = zin.read(item.filename)
 
             if item.filename.endswith('.dex'):
-                print(f"\n  Prüfe {item.filename} ({len(data):,} bytes)...")
-                new_data, n = patch_dex(data)
-                if n > 0:
-                    data = new_data
+                print(f"\n  Checking {item.filename} ({len(data):,} bytes)...")
+                data, n = patch_dex(data)
+                if n:
+                    print(f"  ✓ {n} patch(es) applied")
                     total += n
-                    print(f"  ✓ {n} Patch(es) in {item.filename}")
 
+            # Preserve original compression (STORED or DEFLATED)
             zout.writestr(item, data, compress_type=item.compress_type)
 
-    print(f"\n  Gesamt: {total} Patch(es)")
+    print(f"\n  Total patches: {total}")
     return total > 0
 
 
@@ -176,13 +187,21 @@ def main():
                  input_apk.with_stem(input_apk.stem + "_patched")
 
     print("=" * 60)
-    print("AudioFocus Patcher - ALLE requestAudioFocus Calls deaktivieren")
+    print("AudioFocus Patcher — disable all requestAudioFocus() calls")
+    print("Tidal/Spotify will keep playing when a video starts in Brave")
     print("=" * 60)
 
+    if not input_apk.exists():
+        print(f"Error: file not found: {input_apk}")
+        sys.exit(1)
+
+    print(f"\n  Input:  {input_apk} ({input_apk.stat().st_size/1024/1024:.1f} MB)")
+    print(f"  Output: {output_apk}")
+
     if patch_apk(input_apk, output_apk):
-        print("\n✅ FERTIG:", output_apk)
+        print(f"\n✅ Done: {output_apk}")
     else:
-        print("\n❌ Keine Patches angewendet!")
+        print("\n❌ No patches applied — AudioFocusDelegate not found in any DEX.")
         sys.exit(1)
 
 
