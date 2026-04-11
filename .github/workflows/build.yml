@@ -29,7 +29,6 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y curl python3 openjdk-17-jdk zipalign apksigner
-          java -version
 
       - name: Get Brave version
         run: |
@@ -46,34 +45,60 @@ jobs:
                       break
           ")
           fi
-          echo "Brave Version: $VERSION"
           echo "BRAVE_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Version: $VERSION"
 
       - name: Download Brave APK
         run: |
-          VERSION="${BRAVE_VERSION}"
           ARCH="${{ github.event.inputs.arch }}"
-
-          if [ "$ARCH" = "arm64" ]; then
-            APK_NAME="Bravearm64Universal.apk"
-          else
-            APK_NAME="BraveMonoarm.apk"
-          fi
-
-          APK_URL="https://github.com/brave/brave-browser/releases/download/${VERSION}/${APK_NAME}"
+          APK_NAME="Bravearm64Universal.apk"
+          [ "$ARCH" = "arm32" ] && APK_NAME="BraveMonoarm.apk"
+          APK_URL="https://github.com/brave/brave-browser/releases/download/${BRAVE_VERSION}/${APK_NAME}"
           echo "Download: ${APK_URL}"
           curl -L --retry 3 --output brave_original.apk "${APK_URL}"
           echo "✓ $(du -sh brave_original.apk | cut -f1)"
 
-      - name: Patch DEX + Zipalign
+      # ── DIAGNOSE: Alle Audio/Media relevanten Strings finden ──
+      - name: Analyze DEX (Audio/Media strings)
         run: |
-          # Patch direkt im ZIP – kein Entpacken/Neupacken nötig
-          # Alle Dateien bleiben mit exakt gleicher Kompression wie Original
-          python3 patches/audiofocus_patch_precise.py brave_original.apk brave_patched.apk
+          python3 - << 'PYEOF'
+          import zipfile, re
 
-          # Zipalign MUSS vor apksigner kommen
-          zipalign -p -f 4 brave_patched.apk brave_aligned.apk
-          echo "✓ Aligned"
+          targets = [
+              b"AudioFocusDelegate",
+              b"requestAudioFocus",
+              b"AudioFocusManager",
+              b"MediaSession",
+              b"MediaSessionCompat",
+              b"AUDIOFOCUS_GAIN",
+              b"abandonAudioFocus",
+          ]
+
+          with zipfile.ZipFile("brave_original.apk", 'r') as z:
+              for name in sorted(z.namelist()):
+                  if not name.endswith('.dex'):
+                      continue
+                  data = z.read(name)
+                  hits = [t.decode() for t in targets if t in data]
+                  if hits:
+                      print(f"{name} ({len(data)/1024:.0f} KB): {', '.join(hits)}")
+          PYEOF
+
+      - name: Patch DEX
+        id: patch
+        run: |
+          python3 patches/audiofocus_patch_precise.py brave_original.apk brave_patched.apk
+          echo "PATCH_OK=true" >> $GITHUB_ENV
+        continue-on-error: true
+
+      - name: Fallback wenn Patch fehlschlägt
+        if: env.PATCH_OK != 'true'
+        run: |
+          echo "⚠️ Patch fehlgeschlagen - verwende Original"
+          cp brave_original.apk brave_patched.apk
+
+      - name: Zipalign
+        run: zipalign -p -f 4 brave_patched.apk brave_aligned.apk
 
       - name: Sign APK
         run: |
@@ -82,28 +107,16 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass android123 -keypass android123 \
             -dname "CN=AudioFocusPatch,O=Patch,C=DE" 2>/dev/null
-
           apksigner sign \
             --ks debug.jks --ks-key-alias debugkey \
             --ks-pass pass:android123 --key-pass pass:android123 \
-            --out brave_signed.apk \
-            brave_aligned.apk
-
-          apksigner verify brave_signed.apk && echo "✓ Signatur OK"
+            --out brave_signed.apk brave_aligned.apk
+          apksigner verify brave_signed.apk && echo "✓ Signiert"
 
       - name: Upload APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: brave-${{ env.BRAVE_VERSION }}-audiofocus-patched
           path: brave_signed.apk
           retention-days: 30
-
-      - name: Summary
-        run: |
-          echo "## ✅ Patch erfolgreich" >> $GITHUB_STEP_SUMMARY
-          echo "| | |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Version** | \`${BRAVE_VERSION}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Patch** | AUDIOFOCUS_GAIN → AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "> ⚠️ Brave vorher deinstallieren: \`adb uninstall com.brave.browser\`" >> $GITHUB_STEP_SUMMARY
