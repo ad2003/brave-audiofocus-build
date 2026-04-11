@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       brave_version:
-        description: 'Brave Version z.B. v1.88.125 (leer = neueste stable)'
+        description: 'Brave Version z.B. v1.89.135 (leer = neueste stable)'
         required: false
         default: ''
       arch:
@@ -22,68 +22,38 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      # ── Repo auschecken ────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Tools installieren ─────────────────────────────────
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y \
-            wget curl unzip zip \
-            python3 \
-            openjdk-17-jdk \
-            zipalign \
-            apksigner
+          sudo apt-get install -y wget curl unzip zip python3 openjdk-17-jdk zipalign apksigner
           java -version
-          python3 --version
 
-      # ── Brave Version ermitteln ────────────────────────────
-      - name: Determine Brave version
-        id: version
+      - name: Get Brave version
         run: |
           if [ -n "${{ github.event.inputs.brave_version }}" ]; then
             VERSION="${{ github.event.inputs.brave_version }}"
-            echo "Nutze angegebene Version: $VERSION"
           else
-            echo "Suche neueste stable Version..."
-            # Nur Releases ohne 'beta', 'nightly' im Tag-Namen
-            # prerelease=false filtert Beta/Nightly raus
-            VERSION=$(curl -sf \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/brave/brave-browser/releases" \
+            VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases" \
               | python3 -c "
           import sys, json
-          releases = json.load(sys.stdin)
-          for r in releases:
+          for r in json.load(sys.stdin):
               if not r['prerelease'] and not r['draft']:
-                  tag = r['tag_name']
-                  # Nur 'Release' (nicht Beta/Nightly) im Namen
                   if 'Nightly' not in r['name'] and 'Beta' not in r['name']:
-                      print(tag)
+                      print(r['tag_name'])
                       break
           ")
-            echo "Gefunden: $VERSION"
           fi
-
-          if [ -z "$VERSION" ]; then
-            echo "❌ Konnte Version nicht ermitteln!"
-            exit 1
-          fi
-
+          echo "Brave Version: $VERSION"
           echo "BRAVE_VERSION=$VERSION" >> $GITHUB_ENV
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      # ── APK herunterladen ──────────────────────────────────
       - name: Download Brave APK
         run: |
           VERSION="${BRAVE_VERSION}"
           ARCH="${{ github.event.inputs.arch }}"
 
-          # APK-Dateinamen von Brave:
-          #   arm64 → Bravearm64Universal.apk
-          #   arm32 → BraveMonoarm.apk
           if [ "$ARCH" = "arm64" ]; then
             APK_NAME="Bravearm64Universal.apk"
           else
@@ -91,162 +61,96 @@ jobs:
           fi
 
           APK_URL="https://github.com/brave/brave-browser/releases/download/${VERSION}/${APK_NAME}"
-          echo "Download: $APK_URL"
+          echo "Download: ${APK_URL}"
 
-          curl -L \
-            --retry 3 \
-            --retry-delay 5 \
-            --output brave_original.apk \
-            "$APK_URL"
+          curl -L --retry 3 --retry-delay 5 --output brave_original.apk "${APK_URL}"
 
-          # Prüfe ob wirklich eine APK (ZIP-Format)
           if ! unzip -t brave_original.apk > /dev/null 2>&1; then
-            echo "❌ Heruntergeladene Datei ist keine gültige APK/ZIP!"
+            echo "❌ Keine gültige APK!"
             file brave_original.apk
             exit 1
           fi
 
-          echo "APK Größe: $(du -sh brave_original.apk | cut -f1)"
-          echo "APK_NAME=$APK_NAME" >> $GITHUB_ENV
+          echo "✓ APK: $(du -sh brave_original.apk | cut -f1)"
 
-      # ── APK entpacken ──────────────────────────────────────
       - name: Extract APK
         run: |
           mkdir -p apk_extracted
-
-          # unzip mit -o (overwrite), -q (quiet)
-          # NICHT: META-INF/ – wird später automatisch entfernt
           unzip -q -o brave_original.apk -d apk_extracted
-
           echo "DEX Dateien:"
-          ls -lh apk_extracted/*.dex 2>/dev/null || echo "(keine direkt, Suche in Unterordnern...)"
           find apk_extracted -name "*.dex" -exec ls -lh {} \;
 
-          echo ""
-          echo "APK Inhalt (Übersicht):"
-          ls apk_extracted/
-
-      # ── DEX patchen ────────────────────────────────────────
       - name: Patch DEX (AudioFocus fix)
         run: |
           python3 patches/apply_patch.py apk_extracted
 
-      # ── APK neu packen ─────────────────────────────────────
-      # KRITISCH: Reihenfolge und Kompression müssen stimmen!
-      # 1. META-INF ENTFERNEN (alte Signatur ungültig nach Patch)
-      # 2. .so Dateien UNCOMPRESSED (compression=0) – Android erfordert das
-      # 3. Alles andere komprimiert
-      # 4. zipalign VOR apksigner
       - name: Repackage APK
         run: |
           cd apk_extracted
-
-          # Alte Signatur entfernen (MUSS weg sonst schlägt Verifikation fehl)
           rm -rf META-INF/
 
-          # Neues ZIP aufbauen
-          # Schritt 1: .so Dateien ohne Kompression (store, -0)
-          # Android erfordert das für native Libraries ab API 23
+          # Dateien die UNCOMPRESSED sein müssen (Android API 30+ Pflicht):
+          # - lib/*.so  → Android mappt sie per mmap direkt
+          # - resources.arsc → muss 4-byte-aligned und uncompressed sein
+          # Alles andere: komprimiert
+
+          # 1. Uncompressed: .so Dateien
           if find lib -name "*.so" 2>/dev/null | grep -q .; then
             echo "Füge .so Dateien uncompressed hinzu..."
             find lib -name "*.so" | zip -0 -@ ../brave_repacked.apk
           fi
 
-          # Schritt 2: Alle anderen Dateien (außer lib/) komprimiert
+          # 2. Uncompressed: resources.arsc
+          if [ -f resources.arsc ]; then
+            echo "Füge resources.arsc uncompressed hinzu..."
+            zip -0 ../brave_repacked.apk resources.arsc
+          fi
+
+          # 3. Alles andere komprimiert (außer .so und resources.arsc)
           echo "Füge restliche Dateien komprimiert hinzu..."
           find . -type f \
             ! -path './lib/*.so' \
+            ! -name 'resources.arsc' \
             | zip -9 -@ ../brave_repacked.apk
 
           cd ..
-          echo "Repacked APK: $(du -sh brave_repacked.apk | cut -f1)"
-
-          # Validierung: sollte unzip -t bestehen
+          echo "✓ Repacked: $(du -sh brave_repacked.apk | cut -f1)"
           unzip -t brave_repacked.apk > /dev/null && echo "✓ ZIP valide"
 
-      # ── Ausrichten ─────────────────────────────────────────
-      # zipalign MUSS nach dem Packen und VOR apksigner kommen!
       - name: Zipalign
         run: |
-          # -p: page-align .so files (wichtig für mmap)
-          # -f: overwrite output
-          # 4: alignment in bytes
           zipalign -p -f 4 brave_repacked.apk brave_aligned.apk
           echo "✓ Aligned: $(du -sh brave_aligned.apk | cut -f1)"
 
-          # Verifikation
-          zipalign -c -v 4 brave_aligned.apk > /dev/null 2>&1 \
-            && echo "✓ Alignment verifiziert" \
-            || echo "⚠ Alignment-Check fehlgeschlagen (manchmal false-positive)"
-
-      # ── Signieren ──────────────────────────────────────────
-      # apksigner signiert mit einem neuen Debug-Key.
-      # WICHTIG: Diese APK hat NICHT Braves Original-Signatur →
-      #          du musst Brave vorher deinstallieren!
       - name: Sign APK
         run: |
-          # Debug-Keystore erstellen
           keytool -genkeypair \
-            -keystore debug.jks \
-            -alias debugkey \
-            -keyalg RSA -keysize 2048 \
-            -validity 10000 \
-            -storepass android123 \
-            -keypass android123 \
-            -dname "CN=AudioFocusPatch,OU=Patch,O=Patch,L=DE,ST=DE,C=DE" \
-            2>/dev/null
-          echo "✓ Keystore erstellt"
+            -keystore debug.jks -alias debugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android123 -keypass android123 \
+            -dname "CN=AudioFocusPatch,O=Patch,C=DE" 2>/dev/null
 
-          # Signieren
           apksigner sign \
-            --ks debug.jks \
-            --ks-key-alias debugkey \
-            --ks-pass pass:android123 \
-            --key-pass pass:android123 \
+            --ks debug.jks --ks-key-alias debugkey \
+            --ks-pass pass:android123 --key-pass pass:android123 \
             --out brave_signed.apk \
             brave_aligned.apk
 
-          echo "✓ Signiert"
+          apksigner verify brave_signed.apk && echo "✓ Signatur OK"
 
-          # Verifikation
-          apksigner verify --verbose brave_signed.apk 2>&1 | head -5
-
-      # ── Umbenennen ─────────────────────────────────────────
-      - name: Rename output
-        run: |
-          mkdir -p output
-          OUTNAME="brave-${BRAVE_VERSION}-audiofocus-patched.apk"
-          cp brave_signed.apk "output/${OUTNAME}"
-          echo "✓ Output: output/${OUTNAME}"
-          ls -lh output/
-
-      # ── Artifact hochladen ─────────────────────────────────
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: brave-audiofocus-patched-${{ steps.version.outputs.version }}
-          path: output/*.apk
+          name: brave-${{ env.BRAVE_VERSION }}-audiofocus-patched
+          path: brave_signed.apk
           retention-days: 30
 
-      # ── Zusammenfassung ────────────────────────────────────
       - name: Summary
         run: |
-          echo "## ✅ Brave AudioFocus Patch erfolgreich" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Patch erfolgreich" >> $GITHUB_STEP_SUMMARY
           echo "| | |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Brave Version** | \`${BRAVE_VERSION}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **APK** | \`${APK_NAME}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | \`${BRAVE_VERSION}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Patch** | AUDIOFOCUS_GAIN → AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Installation" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "# Brave MUSS vorher deinstalliert werden (anderer Signing-Key)!" >> $GITHUB_STEP_SUMMARY
-          echo "adb uninstall com.brave.browser" >> $GITHUB_STEP_SUMMARY
-          echo "adb install brave-${BRAVE_VERSION}-audiofocus-patched.apk" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Was der Patch bewirkt" >> $GITHUB_STEP_SUMMARY
-          echo "**Vorher:** Video in Brave startet → Spotify/Tidal **stoppen komplett**" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Nachher:** Video in Brave startet → Spotify/Tidal **ducken kurz oder laufen weiter**" >> $GITHUB_STEP_SUMMARY
+          echo "> ⚠️ Brave vorher deinstallieren: \`adb uninstall com.brave.browser\`" >> $GITHUB_STEP_SUMMARY
