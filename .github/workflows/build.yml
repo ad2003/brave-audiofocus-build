@@ -129,7 +129,7 @@ jobs:
       # ── DEX patchen ────────────────────────────────────────
       - name: Patch DEX (AudioFocus fix)
         run: |
-          python3 patches/audiofocus_patch_precise.py apk_extracted
+          python3 patches/apply_patch.py apk_extracted
 
       # ── APK neu packen ─────────────────────────────────────
       # KRITISCH: Reihenfolge und Kompression müssen stimmen!
