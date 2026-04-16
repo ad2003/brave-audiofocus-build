@@ -2,18 +2,16 @@
 """
 audiofocus_patch_precise.py <input.apk> [output.apk]
 
-Patches all AudioManager.requestAudioFocus() calls in the Brave DEX to no-ops.
-Works directly inside the APK ZIP — no extract/repack needed.
+Patches all AudioManager.requestAudioFocus() calls in Brave:
+Changes AUDIOFOCUS_GAIN (1) → AUDIOFOCUS_GAIN_TRANSIENT (2)
 
-How it works:
-  Parses the DEX string pool and method table to find every method_id
-  named 'requestAudioFocus', then scans the bytecode for invoke-virtual
-  instructions referencing those method_ids and replaces them with:
-    const/4 vX, 0x1  (= AUDIOFOCUS_REQUEST_GRANTED)
-    nop nop nop
+Why GAIN_TRANSIENT works:
+- Android 8+ performs automatic ducking when GAIN_TRANSIENT is requested
+- Tidal/Spotify never receive an onAudioFocusChange callback
+- They keep playing at reduced volume (~20%) automatically
+- Volume is restored when Brave releases focus (video ends/pauses)
 
-  Result: Brave thinks it has audio focus and plays audio normally,
-  but never actually notifies Android — so Tidal/Spotify keep playing.
+This mirrors how Signal handles audio for voice messages.
 """
 
 import sys, struct, zlib, hashlib, zipfile
@@ -40,7 +38,6 @@ def read_uleb128(data, offset):
 
 
 def parse_strings(data):
-    """Return all strings from the DEX string pool."""
     size = struct.unpack_from('<I', data, 56)[0]
     off  = struct.unpack_from('<I', data, 60)[0]
     strings = []
@@ -52,14 +49,12 @@ def parse_strings(data):
 
 
 def parse_type_ids(data):
-    """Return all type descriptor string indices."""
     size = struct.unpack_from('<I', data, 64)[0]
     off  = struct.unpack_from('<I', data, 68)[0]
     return [struct.unpack_from('<I', data, off + i*4)[0] for i in range(size)]
 
 
 def parse_method_ids(data):
-    """Return all method_ids as (class_idx, proto_idx, name_idx) tuples."""
     size = struct.unpack_from('<I', data, 88)[0]
     off  = struct.unpack_from('<I', data, 92)[0]
     methods = []
@@ -75,8 +70,8 @@ def parse_method_ids(data):
 
 def find_all_audiofocus_method_ids(data: bytes) -> list:
     """
-    Find all method_id indices where the method name is 'requestAudioFocus'.
-    Returns a list of indices (usually one per class that has this method).
+    Find all method_ids named 'requestAudioFocus'.
+    Returns list of method_id indices.
     """
     strings  = parse_strings(data)
     type_ids = parse_type_ids(data)
@@ -97,52 +92,79 @@ def find_all_audiofocus_method_ids(data: bytes) -> list:
 
 def patch_dex(dex_data: bytes) -> tuple:
     """
-    Find and patch all invoke-virtual calls to requestAudioFocus() in this DEX.
-    Returns (patched_bytes, number_of_patches_applied).
+    Find the AudioFocusDelegate.requestAudioFocus(boolean) method and patch it:
 
-    DEX invoke-virtual format (35c): 6 bytes
-      0x6e [arg_count] [method_idx_lo] [method_idx_hi] [regs] [regs]
-    Followed by move-result vX: 2 bytes
-      0x0a [register]
+    The method contains this branch:
+      if-eqz p1, :full_gain
+      const/4 v0, 0x3   ← AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK (when transientFocus=true)
+      goto :set
+      :full_gain
+      const/4 v0, 0x1   ← AUDIOFOCUS_GAIN (when transientFocus=false) ← PATCH THIS
 
-    Replacement (8 bytes total):
-      const/4 vX, 0x1  →  0x12 (0x10|reg)   = AUDIOFOCUS_REQUEST_GRANTED
-      nop              →  0x00 0x00
-      nop              →  0x00 0x00
-      nop              →  0x00 0x00  (replaces move-result)
+    We change 0x1 (AUDIOFOCUS_GAIN) → 0x2 (AUDIOFOCUS_GAIN_TRANSIENT)
+    so Android performs automatic ducking instead of stopping other apps.
+
+    Pattern to match:
+      0x12 0x3X  = const/4 vX, 0x3  (MAY_DUCK branch — already correct)
+      0x28 0xXX  = goto
+      0x12 0x1X  = const/4 vX, 0x1  ← change to 0x2X (GAIN_TRANSIENT)
     """
     data = bytearray(dex_data)
 
-    if b'requestAudioFocus' not in data:
+    if b'AudioFocusDelegate' not in data:
         return bytes(data), 0
 
-    method_ids = find_all_audiofocus_method_ids(bytes(data))
-    if not method_ids:
-        return bytes(data), 0
+    print("    ✓ AudioFocusDelegate found")
 
     total = 0
-    for method_idx in method_ids:
-        lo = method_idx & 0xFF
-        hi = (method_idx >> 8) & 0xFF
-        i = 0
-        while i < len(data) - 7:
-            if (data[i]   == 0x6e and   # invoke-virtual opcode
-                data[i+2] == lo    and   # method_idx low byte
-                data[i+3] == hi    and   # method_idx high byte
-                data[i+6] == 0x0a):      # move-result directly after
 
-                reg = data[i+7] & 0xF
-                print(f"    PATCH @ 0x{i:08x}: invoke-virtual → const/4 v{reg}, 0x1 + nops")
+    # Primary pattern: const/4 vX, 0x3 → goto → const/4 vX, 0x1
+    for i in range(len(data) - 5):
+        if data[i] != 0x12:
+            continue
+        if (data[i+1] >> 4) != 0x3:
+            continue
+        reg = data[i+1] & 0x0F
+        if data[i+2] != 0x28:
+            continue
+        goto_offset = data[i+3]
+        if goto_offset == 0 or goto_offset > 50:
+            continue
+        if data[i+4] != 0x12:
+            continue
+        if data[i+5] != ((0x1 << 4) | reg):
+            continue
 
-                # Replace invoke-virtual (6 bytes) with const/4 vX, 0x1 + nops
-                data[i:i+6] = bytes([0x12, (0x1 << 4) | reg, 0x00, 0x00, 0x00, 0x00])
-                # Replace move-result (2 bytes) with nop
-                data[i+6:i+8] = b'\x00\x00'
+        # Found AUDIOFOCUS_GAIN (0x1) — patch to AUDIOFOCUS_GAIN_TRANSIENT (0x2)
+        old_byte = data[i+5]
+        new_byte = (0x2 << 4) | reg  # 0x2X
+        print(f"    PATCH @ 0x{i+5:08x}: 0x{old_byte:02x} → 0x{new_byte:02x}")
+        print(f"    (const/4 v{reg}, 0x1 [GAIN] → const/4 v{reg}, 0x2 [GAIN_TRANSIENT])")
+        print(f"    Android will now auto-duck Tidal/Spotify instead of stopping them")
+        data[i+5] = new_byte
+        total += 1
 
-                total += 1
-                i += 8
-            else:
-                i += 1
+    if total == 0:
+        # Fallback: larger goto offset range
+        print("    Primary pattern not found, trying fallback...")
+        for i in range(len(data) - 8):
+            if data[i] != 0x12 or (data[i+1] >> 4) != 0x3:
+                continue
+            reg = data[i+1] & 0x0F
+            if data[i+2] != 0x28:
+                continue
+            offset = data[i+3]
+            if offset == 0 or offset > 200:
+                continue
+            target = i + 4 + (offset * 2)
+            if target + 1 >= len(data):
+                continue
+            if data[target] != 0x12 or data[target+1] != ((0x1 << 4) | reg):
+                continue
+            old = data[target+1]
+            data[target+1] = (0x2 << 4) | reg
+            print(f"    FALLBACK PATCH @ 0x{target+1:08x}: 0x{old:02x} → 0x{data[target+1]:02x}")
+            total += 1
 
     if total:
         fix_dex_checksum(data)
@@ -153,7 +175,7 @@ def patch_dex(dex_data: bytes) -> tuple:
 def patch_apk(input_apk: Path, output_apk: Path) -> bool:
     """
     Open the APK as a ZIP, patch each DEX file in-place,
-    and write the result preserving original compression for all entries.
+    preserving original compression for all entries.
     """
     total = 0
 
@@ -167,7 +189,7 @@ def patch_apk(input_apk: Path, output_apk: Path) -> bool:
                 print(f"\n  Checking {item.filename} ({len(data):,} bytes)...")
                 data, n = patch_dex(data)
                 if n:
-                    print(f"  ✓ {n} patch(es) applied")
+                    print(f"  ✓ {n} patch(es) applied in {item.filename}")
                     total += n
 
             # Preserve original compression (STORED or DEFLATED)
@@ -187,8 +209,8 @@ def main():
                  input_apk.with_stem(input_apk.stem + "_patched")
 
     print("=" * 60)
-    print("AudioFocus Patcher — disable all requestAudioFocus() calls")
-    print("Tidal/Spotify will keep playing when a video starts in Brave")
+    print("AudioFocus Patcher — GAIN → GAIN_TRANSIENT (auto-duck)")
+    print("Tidal/Spotify will duck (play quieter) instead of stopping")
     print("=" * 60)
 
     if not input_apk.exists():
@@ -201,7 +223,7 @@ def main():
     if patch_apk(input_apk, output_apk):
         print(f"\n✅ Done: {output_apk}")
     else:
-        print("\n❌ No patches applied — AudioFocusDelegate not found in any DEX.")
+        print("\n❌ No patches applied — AudioFocusDelegate not found!")
         sys.exit(1)
 
 
