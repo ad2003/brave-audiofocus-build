@@ -16,7 +16,7 @@ Option A — GitHub Actions (recommended, no setup needed)
 
 Fork this repo
 Go to Actions → Brave AudioFocus APK Patcher → Run workflow
-Leave the version field empty (= latest stable) or enter a specific version like v1.89.135
+Leave the version field empty (= latest stable - careful - might stop and bug, better give a specific version!) or enter a specific version like v1.89.135
 Download the APK from the Artifacts section after ~2 minutes
 
 Option B — Run locally
