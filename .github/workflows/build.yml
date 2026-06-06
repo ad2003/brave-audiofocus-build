@@ -4,17 +4,20 @@ on:
   workflow_dispatch:
     inputs:
       brave_version:
-        description: 'Brave Version z.B. v1.89.135 (leer = neueste stable)'
+        description: "Brave Version z.B. v1.93.37 (leer = neueste stable)"
         required: false
-        default: ''
+        default: ""
       arch:
-        description: 'CPU Architektur'
+        description: "CPU Architektur"
         required: true
-        default: 'arm64'
+        default: "arm64"
         type: choice
         options:
           - arm64
           - arm32
+
+permissions:
+  contents: write
 
 jobs:
   patch:
@@ -30,7 +33,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y curl python3 openjdk-17-jdk zipalign apksigner
 
-      - name: Get Brave version
+      - name: Set Brave version
         run: |
           if [ -n "${{ github.event.inputs.brave_version }}" ]; then
             VERSION="${{ github.event.inputs.brave_version }}"
@@ -45,19 +48,22 @@ jobs:
         run: |
           ARCH="${{ github.event.inputs.arch }}"
           APK_NAME="Bravearm64Universal.apk"
-          [ "$ARCH" = "arm32" ] && APK_NAME="BraveMonoarm.apk"
+          if [ "$ARCH" = "arm32" ]; then APK_NAME="BraveMonoarm.apk"; fi
+
           APK_URL="https://github.com/brave/brave-browser/releases/download/${BRAVE_VERSION}/${APK_NAME}"
-          curl -L --output brave_original.apk "$APK_URL"
+          echo "Download: $APK_URL"
+
+          curl -L --retry 3 -o brave_original.apk "$APK_URL"
 
       - name: Patch APK
         run: |
           python3 patches/audiofocus_patch_precise.py brave_original.apk brave_patched.apk
 
-      - name: Zipalign
+      - name: Zipalign APK
         run: |
           zipalign -p 4 brave_patched.apk brave_aligned.apk
 
-      - name: Decode keystore
+      - name: Decode Keystore
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > release.jks
 
@@ -71,11 +77,11 @@ jobs:
             --out brave_signed.apk \
             brave_aligned.apk
 
-          apksigner verify brave_signed.apk
+          apksigner verify brave_signed.apk && echo "✓ SIGNED OK"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.BRAVE_VERSION }}
+          tag_name: v${{ env.BRAVE_VERSION }}
           name: Brave Patched ${{ env.BRAVE_VERSION }}
-          path: brave_signed.apk
+          files: brave_signed.apk
