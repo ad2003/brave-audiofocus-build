@@ -74,8 +74,8 @@ jobs:
           apksigner verify brave_signed.apk
 
       - name: Create GitHub Release
-  uses: softprops/action-gh-release@v2
-  with:
-    tag_name: ${{ env.BRAVE_VERSION }}
-    name: Brave Patched ${{ env.BRAVE_VERSION }}
-    files: brave_signed.apk
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.BRAVE_VERSION }}
+          name: Brave Patched ${{ env.BRAVE_VERSION }}
+          path: brave_signed.apk
