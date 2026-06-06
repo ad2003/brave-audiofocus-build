@@ -73,8 +73,9 @@ jobs:
 
           apksigner verify brave_signed.apk
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: brave-patched
-          path: brave_signed.apk
+      - name: Create GitHub Release
+  uses: softprops/action-gh-release@v2
+  with:
+    tag_name: ${{ env.BRAVE_VERSION }}
+    name: Brave Patched ${{ env.BRAVE_VERSION }}
+    files: brave_signed.apk
