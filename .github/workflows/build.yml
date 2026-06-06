@@ -33,13 +33,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y curl python3 openjdk-17-jdk zipalign apksigner
 
-      - name: Set Brave version
+      - name: Set Brave version (STABLE ONLY)
         run: |
           if [ -n "${{ github.event.inputs.brave_version }}" ]; then
             VERSION="${{ github.event.inputs.brave_version }}"
           else
             VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases" \
-              | python3 -c "import sys, json; print([r['tag_name'] for r in json.load(sys.stdin) if not r['prerelease'] and not r['draft']][0])")
+              | python3 -c "import sys, json; print(next(r['tag_name'] for r in json.load(sys.stdin) if not r.get('prerelease') and not r.get('draft')))")
           fi
           echo "BRAVE_VERSION=$VERSION" >> $GITHUB_ENV
           echo "Version: $VERSION"
