@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       brave_version:
-        description: "Brave Version z.B. v1.93.37 (leer = neueste stable)"
+        description: "Brave Version (leer = neueste stable)"
         required: false
         default: ""
       arch:
@@ -33,36 +33,69 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y curl python3 openjdk-17-jdk zipalign apksigner
 
-      - name: Set Brave version
+      # ─────────────────────────────
+      # VERSION RESOLVER (SAFE)
+      # ─────────────────────────────
+      - name: Set Brave version (stable only)
         run: |
           if [ -n "${{ github.event.inputs.brave_version }}" ]; then
-            VERSION="${{ github.event.inputs.brave_version }}"
+            echo "BRAVE_VERSION=${{ github.event.inputs.brave_version }}" >> $GITHUB_ENV
           else
-            VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases" \
-              | python3 -c "import sys, json; print([r['tag_name'] for r in json.load(sys.stdin) if not r['prerelease'] and not r['draft']][0])")
-          fi
-          echo "BRAVE_VERSION=$VERSION" >> $GITHUB_ENV
-          echo "Version: $VERSION"
+            VERSION=$(curl -s https://api.github.com/repos/brave/brave-browser/releases \
+              | python3 -c "
+import sys, json
 
+data = json.load(sys.stdin)
+
+for r in data:
+    name = r.get('name','').lower()
+    tag = r.get('tag_name','').lower()
+
+    if any(x in name for x in ['nightly','beta','dev','canary']):
+        continue
+    if not r.get('prerelease') and not r.get('draft'):
+        print(r['tag_name'])
+        break
+")
+            echo "BRAVE_VERSION=$VERSION" >> $GITHUB_ENV
+          fi
+
+          echo "Selected version: $BRAVE_VERSION"
+
+      # ─────────────────────────────
+      # DOWNLOAD
+      # ─────────────────────────────
       - name: Download Brave APK
         run: |
           ARCH="${{ github.event.inputs.arch }}"
+
           APK_NAME="Bravearm64Universal.apk"
-          if [ "$ARCH" = "arm32" ]; then APK_NAME="BraveMonoarm.apk"; fi
+          if [ "$ARCH" = "arm32" ]; then
+            APK_NAME="BraveMonoarm.apk"
+          fi
 
-          APK_URL="https://github.com/brave/brave-browser/releases/download/${BRAVE_VERSION}/${APK_NAME}"
-          echo "Download: $APK_URL"
+          URL="https://github.com/brave/brave-browser/releases/download/${BRAVE_VERSION}/${APK_NAME}"
 
-          curl -L --retry 3 -o brave_original.apk "$APK_URL"
+          echo "Downloading $URL"
+          curl -L -o brave_original.apk "$URL"
 
+      # ─────────────────────────────
+      # PATCH
+      # ─────────────────────────────
       - name: Patch APK
         run: |
           python3 patches/audiofocus_patch_precise.py brave_original.apk brave_patched.apk
 
-      - name: Zipalign APK
+      # ─────────────────────────────
+      # ALIGN
+      # ─────────────────────────────
+      - name: Zipalign
         run: |
           zipalign -p 4 brave_patched.apk brave_aligned.apk
 
+      # ─────────────────────────────
+      # SIGN
+      # ─────────────────────────────
       - name: Decode Keystore
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > release.jks
@@ -77,9 +110,12 @@ jobs:
             --out brave_signed.apk \
             brave_aligned.apk
 
-          apksigner verify brave_signed.apk && echo "✓ SIGNED OK"
+          apksigner verify brave_signed.apk
 
-      - name: Create GitHub Release
+      # ─────────────────────────────
+      # RELEASE
+      # ─────────────────────────────
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.BRAVE_VERSION }}
