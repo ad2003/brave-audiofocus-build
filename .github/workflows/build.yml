@@ -36,14 +36,7 @@ jobs:
             VERSION="${{ github.event.inputs.brave_version }}"
           else
             VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases" \
-              | python3 -c "
-import sys, json
-for r in json.load(sys.stdin):
-    if not r['prerelease'] and not r['draft']:
-        if 'Nightly' not in r['name'] and 'Beta' not in r['name']:
-            print(r['tag_name'])
-            break
-")
+              | python3 -c "import sys, json; print([r['tag_name'] for r in json.load(sys.stdin) if not r['prerelease'] and not r['draft']][0])")
           fi
           echo "BRAVE_VERSION=$VERSION" >> $GITHUB_ENV
           echo "Version: $VERSION"
@@ -54,53 +47,15 @@ for r in json.load(sys.stdin):
           APK_NAME="Bravearm64Universal.apk"
           [ "$ARCH" = "arm32" ] && APK_NAME="BraveMonoarm.apk"
           APK_URL="https://github.com/brave/brave-browser/releases/download/${BRAVE_VERSION}/${APK_NAME}"
-          echo "Download: ${APK_URL}"
-          curl -L --retry 3 --output brave_original.apk "${APK_URL}"
-          echo "✓ $(du -sh brave_original.apk | cut -f1)"
+          curl -L --output brave_original.apk "$APK_URL"
 
-      # ── Diagnose ──
-      - name: Analyze DEX (Audio/Media strings)
-        run: |
-          python3 - << 'PYEOF'
-import zipfile
-
-targets = [
-    b"AudioFocusDelegate",
-    b"requestAudioFocus",
-    b"AudioFocusManager",
-    b"MediaSession",
-    b"MediaSessionCompat",
-    b"AUDIOFOCUS_GAIN",
-    b"abandonAudioFocus",
-]
-
-with zipfile.ZipFile("brave_original.apk", 'r') as z:
-    for name in sorted(z.namelist()):
-        if not name.endswith('.dex'):
-            continue
-        data = z.read(name)
-        hits = [t.decode() for t in targets if t in data]
-        if hits:
-            print(f"{name}: {', '.join(hits)}")
-PYEOF
-
-      - name: Patch DEX
-        id: patch
+      - name: Patch APK
         run: |
           python3 patches/audiofocus_patch_precise.py brave_original.apk brave_patched.apk
-          echo "PATCH_OK=true" >> $GITHUB_ENV
-
-      - name: Fail if patch failed
-        if: env.PATCH_OK != 'true'
-        run: |
-          echo "❌ Patch fehlgeschlagen"
-          exit 1
 
       - name: Zipalign
         run: |
           zipalign -p 4 brave_patched.apk brave_aligned.apk
-
-      # ── SIGNING (FIXED: using GitHub Secrets) ──
 
       - name: Decode keystore
         run: |
@@ -116,11 +71,10 @@ PYEOF
             --out brave_signed.apk \
             brave_aligned.apk
 
-          apksigner verify brave_signed.apk && echo "✓ Signiert"
+          apksigner verify brave_signed.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: brave-${{ env.BRAVE_VERSION }}-audiofocus-patched
+          name: brave-patched
           path: brave_signed.apk
-          retention-days: 30
