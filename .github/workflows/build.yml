@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       brave_version:
-        description: "Brave Version z.B. v1.93.37 (leer = neueste stable)"
+        description: "Brave Version z.B. v1.91.169 (leer = neueste stable)"
         required: false
         default: ""
       arch:
@@ -50,7 +50,18 @@ jobs:
             VERSION="${{ github.event.inputs.brave_version }}"
           else
             VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases?per_page=100" \
-              | python3 -c "import sys, json; print(next(r['tag_name'] for r in json.load(sys.stdin) if not r.get('prerelease') and not r.get('draft')))")
+              | python3 -c "
+          import sys, json
+          releases = json.load(sys.stdin)
+          stable = next(
+            r['tag_name'] for r in releases
+            if not r.get('prerelease')
+            and not r.get('draft')
+            and 'nightly' not in r.get('name', '').lower()
+            and 'beta' not in r.get('name', '').lower()
+          )
+          print(stable)
+          ")
           fi
           echo "BRAVE_VERSION=$VERSION" >> $GITHUB_ENV
           echo "Version: $VERSION"
