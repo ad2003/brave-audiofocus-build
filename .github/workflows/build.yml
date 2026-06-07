@@ -44,10 +44,12 @@ jobs:
 
       - name: Set Brave version (STABLE ONLY)
         run: |
-          if [ -n "${{ github.event.inputs.brave_version }}" ]; then
+          if [ -n "${{ inputs.brave_version }}" ]; then
+            VERSION="${{ inputs.brave_version }}"
+          elif [ -n "${{ github.event.inputs.brave_version }}" ]; then
             VERSION="${{ github.event.inputs.brave_version }}"
           else
-            VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases" \
+            VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases?per_page=100" \
               | python3 -c "import sys, json; print(next(r['tag_name'] for r in json.load(sys.stdin) if not r.get('prerelease') and not r.get('draft')))")
           fi
           echo "BRAVE_VERSION=$VERSION" >> $GITHUB_ENV
@@ -55,7 +57,8 @@ jobs:
 
       - name: Download Brave APK
         run: |
-          ARCH="${{ github.event.inputs.arch }}"
+          ARCH="${{ inputs.arch }}"
+          if [ -z "$ARCH" ]; then ARCH="${{ github.event.inputs.arch }}"; fi
           if [ -z "$ARCH" ]; then ARCH="arm64"; fi
           APK_NAME="Bravearm64Universal.apk"
           if [ "$ARCH" = "arm32" ]; then APK_NAME="BraveMonoarm.apk"; fi
@@ -89,6 +92,6 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ env.BRAVE_VERSION }}
+          tag_name: ${{ env.BRAVE_VERSION }}
           name: Brave Patched ${{ env.BRAVE_VERSION }}
           files: brave_signed.apk
