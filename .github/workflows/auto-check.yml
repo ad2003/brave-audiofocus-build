@@ -21,7 +21,7 @@ jobs:
         run: |
           VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases?per_page=100" \
             | python3 -c "
-          import sys, json, urllib.request
+          import sys, json, subprocess
           releases = json.load(sys.stdin)
           for r in releases:
             if r.get('prerelease') or r.get('draft'):
@@ -32,14 +32,13 @@ jobs:
               continue
             tag = r['tag_name']
             url = f'https://github.com/brave/brave-browser/releases/download/{tag}/Bravearm64Universal.apk'
-            try:
-              req = urllib.request.Request(url, method='HEAD')
-              resp = urllib.request.urlopen(req, timeout=10)
-              if resp.status == 200:
-                print(tag)
-                break
-            except:
-              continue
+            result = subprocess.run(
+              ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '-L', '--max-time', '10', '-I', url],
+              capture_output=True, text=True
+            )
+            if result.stdout.strip() == '200':
+              print(tag)
+              break
           ")
           if [ -z "$VERSION" ]; then
             echo "⚠️ Keine stable Version mit APK gefunden — abbruch."
