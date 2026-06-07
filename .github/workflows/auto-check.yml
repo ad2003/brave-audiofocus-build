@@ -19,7 +19,10 @@ jobs:
       - name: Neueste Brave stable Version mit APK holen
         id: get_brave
         run: |
-          VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases?per_page=100" \
+          VERSION=$(curl -sf \
+            -H "Cache-Control: no-cache" \
+            -H "Pragma: no-cache" \
+            "https://api.github.com/repos/brave/brave-browser/releases?per_page=100" \
             | python3 -c "
           import sys, json, subprocess
           releases = json.load(sys.stdin)
@@ -36,6 +39,7 @@ jobs:
               ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '-L', '--max-time', '10', '-I', url],
               capture_output=True, text=True
             )
+            print(f'Checking {tag}: {result.stdout.strip()}', file=sys.stderr)
             if result.stdout.strip() == '200':
               print(tag)
               break
