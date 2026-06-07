@@ -16,42 +16,37 @@ jobs:
       version: ${{ steps.check.outputs.version }}
 
     steps:
-      - name: Neueste Brave stable Version holen
+      - name: Neueste Brave stable Version mit APK holen
         id: get_brave
         run: |
           VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases?per_page=100" \
             | python3 -c "
-          import sys, json
+          import sys, json, urllib.request
           releases = json.load(sys.stdin)
-          stable = next(
-            r['tag_name'] for r in releases
-            if not r.get('prerelease')
-            and not r.get('draft')
-            and 'nightly' not in r.get('name', '').lower()
-            and 'beta' not in r.get('name', '').lower()
-          )
-          print(stable)
+          for r in releases:
+            if r.get('prerelease') or r.get('draft'):
+              continue
+            if 'nightly' in r.get('name', '').lower():
+              continue
+            if 'beta' in r.get('name', '').lower():
+              continue
+            tag = r['tag_name']
+            url = f'https://github.com/brave/brave-browser/releases/download/{tag}/Bravearm64Universal.apk'
+            try:
+              req = urllib.request.Request(url, method='HEAD')
+              resp = urllib.request.urlopen(req, timeout=10)
+              if resp.status == 200:
+                print(tag)
+                break
+            except:
+              continue
           ")
-          echo "brave_version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Neueste Brave stable: $VERSION"
-
-      - name: Prüfen ob APK verfügbar ist
-        id: apk_check
-        run: |
-          VERSION="${{ steps.get_brave.outputs.brave_version }}"
-          APK_URL="https://github.com/brave/brave-browser/releases/download/${VERSION}/Bravearm64Universal.apk"
-          echo "Prüfe: $APK_URL"
-
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -L --max-time 10 "$APK_URL")
-          echo "HTTP Status: $HTTP_CODE"
-
-          if [ "$HTTP_CODE" = "200" ]; then
-            echo "✅ APK verfügbar"
-            echo "apk_available=true" >> $GITHUB_OUTPUT
-          else
-            echo "⏭️ APK noch nicht verfügbar ($HTTP_CODE) — überspringe Build"
-            echo "apk_available=false" >> $GITHUB_OUTPUT
+          if [ -z "$VERSION" ]; then
+            echo "⚠️ Keine stable Version mit APK gefunden — abbruch."
+            exit 1
           fi
+          echo "brave_version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Neueste Brave stable mit APK: $VERSION"
 
       - name: Letzten eigenen Release holen
         id: get_own
@@ -69,12 +64,6 @@ jobs:
       - name: Vergleichen
         id: check
         run: |
-          if [ "${{ steps.apk_check.outputs.apk_available }}" = "false" ]; then
-            echo "⏭️ Kein APK verfügbar — Build wird nicht gestartet."
-            echo "should_build=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
           BRAVE="${{ steps.get_brave.outputs.brave_version }}"
           LAST="${{ steps.get_own.outputs.last_release }}"
 
@@ -84,6 +73,13 @@ jobs:
 
           echo "Brave (clean): $BRAVE_CLEAN"
           echo "Letzter Build (clean): $LAST_CLEAN"
+
+          if [ -z "$LAST_CLEAN" ]; then
+            echo "🆕 Kein eigener Release gefunden — starte Build für $BRAVE"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "version=$BRAVE" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           if [ "$BRAVE_CLEAN" = "$LAST_CLEAN" ]; then
             echo "✅ Bereits gebaut: $BRAVE — nichts zu tun."
