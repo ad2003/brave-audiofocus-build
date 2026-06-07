@@ -15,6 +15,16 @@ on:
         options:
           - arm64
           - arm32
+  workflow_call:
+    inputs:
+      brave_version:
+        required: false
+        type: string
+        default: ""
+      arch:
+        required: false
+        type: string
+        default: "arm64"
 
 permissions:
   contents: write
@@ -23,7 +33,6 @@ jobs:
   patch:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,12 +56,11 @@ jobs:
       - name: Download Brave APK
         run: |
           ARCH="${{ github.event.inputs.arch }}"
+          if [ -z "$ARCH" ]; then ARCH="arm64"; fi
           APK_NAME="Bravearm64Universal.apk"
           if [ "$ARCH" = "arm32" ]; then APK_NAME="BraveMonoarm.apk"; fi
-
           APK_URL="https://github.com/brave/brave-browser/releases/download/${BRAVE_VERSION}/${APK_NAME}"
           echo "Download: $APK_URL"
-
           curl -L --retry 3 -o brave_original.apk "$APK_URL"
 
       - name: Patch APK
@@ -76,7 +84,6 @@ jobs:
             --key-pass pass:${{ secrets.ANDROID_KEY_PASSWORD }} \
             --out brave_signed.apk \
             brave_aligned.apk
-
           apksigner verify brave_signed.apk && echo "✓ SIGNED OK"
 
       - name: Create GitHub Release
