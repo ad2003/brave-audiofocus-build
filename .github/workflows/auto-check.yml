@@ -4,6 +4,8 @@ on:
   schedule:
     - cron: '0 9 * * *'   # täglich um 9 Uhr
   workflow_dispatch:          # auch manuell auslösbar
+permissions:
+  contents: write 
 
 jobs:
   check:
