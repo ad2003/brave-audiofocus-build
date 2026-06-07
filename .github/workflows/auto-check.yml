@@ -19,49 +19,31 @@ jobs:
       - name: Neueste Brave stable Version mit APK holen
         id: get_brave
         run: |
-          VERSION=$(python3 << 'EOF'
-          import json, subprocess, sys
-
-          found = None
-          for page in range(1, 11):
+          VERSION=$(curl -sf \
+            -H "Cache-Control: no-cache" \
+            -H "Pragma: no-cache" \
+            "https://api.github.com/repos/brave/brave-browser/releases?per_page=100" \
+            | python3 -c "
+          import sys, json, subprocess
+          releases = json.load(sys.stdin)
+          for r in releases:
+            if r.get('prerelease') or r.get('draft'):
+              continue
+            if 'nightly' in r.get('name', '').lower():
+              continue
+            if 'beta' in r.get('name', '').lower():
+              continue
+            tag = r['tag_name']
+            url = f'https://github.com/brave/brave-browser/releases/download/{tag}/Bravearm64Universal.apk'
             result = subprocess.run(
-              ['curl', '-sf',
-               '-H', 'Cache-Control: no-cache',
-               '-H', 'Authorization: token ',
-               f'https://api.github.com/repos/brave/brave-browser/releases?per_page=100&page={page}'],
+              ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '-L', '--max-time', '10', '-I', url],
               capture_output=True, text=True
             )
-            releases = json.loads(result.stdout)
-            if not releases:
-              print(f'Seite {page} leer, stoppe.', file=sys.stderr)
+            print(f'Checking {tag}: {result.stdout.strip()}', file=sys.stderr)
+            if result.stdout.strip() == '200':
+              print(tag)
               break
-            print(f'Seite {page}: {len(releases)} Releases', file=sys.stderr)
-            for r in releases:
-              name = r.get('name', '').lower()
-              tag = r['tag_name']
-              if 'nightly' in name or 'beta' in name or 'alpha' in name:
-                continue
-              print(f'Kandidat: {tag} ({r.get("name","")[:50]})', file=sys.stderr)
-              url = f'https://github.com/brave/brave-browser/releases/download/{tag}/Bravearm64Universal.apk'
-              check = subprocess.run(
-                ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '-L', '--max-time', '15', '-I', url],
-                capture_output=True, text=True
-              )
-              code = check.stdout.strip()
-              print(f'  APK check {tag}: {code}', file=sys.stderr)
-              if code == '200':
-                found = tag
-                break
-            if found:
-              break
-
-          if found:
-            print(found)
-          else:
-            print('NICHT GEFUNDEN', file=sys.stderr)
-            sys.exit(1)
-          EOF
-          )
+          ")
           if [ -z "$VERSION" ]; then
             echo "⚠️ Keine stable Version mit APK gefunden — abbruch."
             exit 1
