@@ -1,4 +1,3 @@
-```yaml
 name: Auto-Check Brave Stable Release
 
 on:
@@ -103,4 +102,3 @@ jobs:
       brave_version: ${{ needs.check.outputs.version }}
       arch: "arm64"
     secrets: inherit
-```
