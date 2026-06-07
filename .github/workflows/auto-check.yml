@@ -25,7 +25,10 @@ jobs:
           releases = json.load(sys.stdin)
           stable = next(
             r['tag_name'] for r in releases
-            if not r.get('prerelease') and not r.get('draft')
+            if not r.get('prerelease')
+            and not r.get('draft')
+            and 'nightly' not in r.get('name', '').lower()
+            and 'beta' not in r.get('name', '').lower()
           )
           print(stable)
           ")
@@ -51,7 +54,6 @@ jobs:
           BRAVE="${{ steps.get_brave.outputs.brave_version }}"
           LAST="${{ steps.get_own.outputs.last_release }}"
 
-          # Normalisieren: v-Prefix entfernen für sauberen Vergleich
           BRAVE_CLEAN="${BRAVE#v}"
           LAST_CLEAN="${LAST#v}"
           LAST_CLEAN="${LAST_CLEAN#v}"
