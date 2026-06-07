@@ -1,0 +1,69 @@
+name: Auto-Check Brave Stable Release
+
+on:
+  schedule:
+    - cron: '0 9 * * *'   # täglich um 9 Uhr
+  workflow_dispatch:          # auch manuell auslösbar
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      version: ${{ steps.check.outputs.version }}
+
+    steps:
+      - name: Neueste Brave stable Version holen
+        id: get_brave
+        run: |
+          VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases" \
+            | python3 -c "
+          import sys, json
+          releases = json.load(sys.stdin)
+          stable = next(
+            r['tag_name'] for r in releases
+            if not r.get('prerelease') and not r.get('draft')
+          )
+          print(stable)
+          ")
+          echo "brave_version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Neueste Brave stable: $VERSION"
+
+      - name: Letzten eigenen Release holen
+        id: get_own
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LAST=$(gh release list \
+            --repo ${{ github.repository }} \
+            --limit 1 \
+            --json tagName \
+            --jq '.[0].tagName' 2>/dev/null || echo "")
+          echo "last_release=$LAST" >> $GITHUB_OUTPUT
+          echo "Letzter eigener Release: $LAST"
+
+      - name: Vergleichen
+        id: check
+        run: |
+          BRAVE="${{ steps.get_brave.outputs.brave_version }}"
+          LAST="${{ steps.get_own.outputs.last_release }}"
+
+          # Eigener Release-Tag hat "v" Prefix (aus deinem build.yml: tag_name: v${{ env.BRAVE_VERSION }})
+          # Brave version hat auch "v" prefix → direkter Vergleich
+          if [ "v$BRAVE" = "$LAST" ] || [ "$BRAVE" = "$LAST" ]; then
+            echo "✅ Bereits gebaut: $BRAVE — nichts zu tun."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "🆕 Neue Version: $BRAVE (letzter Build: $LAST)"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "version=$BRAVE" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    uses: ./.github/workflows/build.yml   # ← dein bestehender Workflow
+    with:
+      brave_version: ${{ needs.check.outputs.version }}
+      arch: "arm64"
+    secrets: inherit   # ANDROID_KEYSTORE etc. werden weitergegeben
