@@ -2,10 +2,11 @@ name: Auto-Check Brave Stable Release
 
 on:
   schedule:
-    - cron: '0 9 * * *'   # täglich um 9 Uhr
-  workflow_dispatch:          # auch manuell auslösbar
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
 permissions:
-  contents: write 
+  contents: write
 
 jobs:
   check:
@@ -18,7 +19,7 @@ jobs:
       - name: Neueste Brave stable Version holen
         id: get_brave
         run: |
-          VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases" \
+          VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases?per_page=100" \
             | python3 -c "
           import sys, json
           releases = json.load(sys.stdin)
@@ -50,9 +51,15 @@ jobs:
           BRAVE="${{ steps.get_brave.outputs.brave_version }}"
           LAST="${{ steps.get_own.outputs.last_release }}"
 
-          # Eigener Release-Tag hat "v" Prefix (aus deinem build.yml: tag_name: v${{ env.BRAVE_VERSION }})
-          # Brave version hat auch "v" prefix → direkter Vergleich
-          if [ "v$BRAVE" = "$LAST" ] || [ "$BRAVE" = "$LAST" ]; then
+          # Normalisieren: v-Prefix entfernen für sauberen Vergleich
+          BRAVE_CLEAN="${BRAVE#v}"
+          LAST_CLEAN="${LAST#v}"
+          LAST_CLEAN="${LAST_CLEAN#v}"
+
+          echo "Brave (clean): $BRAVE_CLEAN"
+          echo "Letzter Build (clean): $LAST_CLEAN"
+
+          if [ "$BRAVE_CLEAN" = "$LAST_CLEAN" ]; then
             echo "✅ Bereits gebaut: $BRAVE — nichts zu tun."
             echo "should_build=false" >> $GITHUB_OUTPUT
           else
@@ -64,8 +71,8 @@ jobs:
   build:
     needs: check
     if: needs.check.outputs.should_build == 'true'
-    uses: ./.github/workflows/build.yml   # ← dein bestehender Workflow
+    uses: ./.github/workflows/build.yml
     with:
       brave_version: ${{ needs.check.outputs.version }}
       arch: "arm64"
-    secrets: inherit   # ANDROID_KEYSTORE etc. werden weitergegeben
+    secrets: inherit
