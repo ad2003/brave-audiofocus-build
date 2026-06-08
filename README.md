@@ -1,4 +1,4 @@
-# Brave AudioFocus Patcher
+# Brave for Android AudioFocus Patcher
 
 Patches the Brave Android APK so that Spotify, Tidal, and other music apps keep playing when a video starts in Brave.
 
