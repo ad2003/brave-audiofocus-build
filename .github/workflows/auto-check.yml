@@ -18,10 +18,13 @@ jobs:
     steps:
       - name: Neueste Brave stable Version mit APK holen
         id: get_brave
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=$(curl -sf \
             -H "Cache-Control: no-cache" \
             -H "Pragma: no-cache" \
+            -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/brave/brave-browser/releases?per_page=100" \
             | python3 -c "
           import sys, json, subprocess
