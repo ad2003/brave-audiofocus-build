@@ -10,7 +10,7 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  
+
 jobs:
   check:
     runs-on: ubuntu-22.04
@@ -90,8 +90,13 @@ jobs:
             exit 0
           fi
 
+          BRAVE_LATEST=$(printf '%s\n' "$BRAVE_CLEAN" "$LAST_CLEAN" | sort -V | tail -1)
+
           if [ "$BRAVE_CLEAN" = "$LAST_CLEAN" ]; then
             echo "✅ Bereits gebaut: $BRAVE — nichts zu tun."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          elif [ "$BRAVE_LATEST" = "$LAST_CLEAN" ]; then
+            echo "✅ Eigener Build ($LAST_CLEAN) ist neuer als gefundene Version ($BRAVE_CLEAN) — nichts zu tun."
             echo "should_build=false" >> $GITHUB_OUTPUT
           else
             echo "🆕 Neue Version: $BRAVE (letzter Build: $LAST)"
