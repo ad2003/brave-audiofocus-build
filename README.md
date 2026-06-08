@@ -62,3 +62,16 @@ The patcher opens the APK as a ZIP, finds every invoke-virtual AudioManager->req
 - Play Store/Aurora Store auto-updates won't work (different signing key) — the GitHub Action handles this automatically
 - Hardware media keys (headphone play/pause) may no longer control Brave video playback
 - Only tested on arm64 devices
+
+## Disclaimer
+
+This project is provided as-is, without any warranty or guarantee of any kind. Use at your own risk.
+
+- This is an unofficial, third-party modification of the Brave Browser APK
+- The patched APK is not affiliated with, endorsed by, or supported by Brave Software, Inc.
+- Installing a modified APK may void your warranty and violates Brave's terms of service
+- The different signing key means you will not receive official Brave updates via Play Store or Aurora Store
+- Security updates from Brave will not be automatically applied — you are responsible for keeping up with new releases
+- The author(s) of this project accept no responsibility for any damage, data loss, security vulnerabilities, or other issues arising from the use of this software
+
+By downloading and installing this APK you acknowledge that you understand and accept these risks.
