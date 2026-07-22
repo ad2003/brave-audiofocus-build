@@ -1,0 +1,104 @@
+name: Brave AudioFocus APK Patcher (DUCK - Test)
+
+# Bewusst NUR workflow_dispatch:
+# kein workflow_call -> auto-check.yml kann diesen Workflow nie auslösen.
+# Kein Release -> Obtainium und die Versionslogik in auto-check.yml
+# (gh release list --limit 1) bleiben komplett unberührt.
+
+on:
+  workflow_dispatch:
+    inputs:
+      brave_version:
+        description: "Brave Version z.B. v1.93.125 (leer = neueste stable)"
+        required: false
+        default: ""
+      arch:
+        description: "CPU Architektur"
+        required: true
+        default: "arm64"
+        type: choice
+        options:
+          - arm64
+          - arm32
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y curl python3 openjdk-17-jdk zipalign apksigner
+
+      - name: Set Brave version (STABLE ONLY)
+        run: |
+          if [ -n "${{ github.event.inputs.brave_version }}" ]; then
+            VERSION="${{ github.event.inputs.brave_version }}"
+          else
+            VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases?per_page=100" \
+              | python3 -c "
+          import sys, json
+          releases = json.load(sys.stdin)
+          stable = next(
+            r['tag_name'] for r in releases
+            if not r.get('prerelease')
+            and not r.get('draft')
+            and 'nightly' not in r.get('name', '').lower()
+            and 'beta' not in r.get('name', '').lower()
+          )
+          print(stable)
+          ")
+          fi
+          echo "BRAVE_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Version: $VERSION"
+
+      - name: Download Brave APK
+        run: |
+          ARCH="${{ github.event.inputs.arch }}"
+          if [ -z "$ARCH" ]; then ARCH="arm64"; fi
+          APK_NAME="Bravearm64Universal.apk"
+          if [ "$ARCH" = "arm32" ]; then APK_NAME="BraveMonoarm.apk"; fi
+          APK_URL="https://github.com/brave/brave-browser/releases/download/${BRAVE_VERSION}/${APK_NAME}"
+          echo "Download: $APK_URL"
+          curl -L --retry 3 -o brave_original.apk "$APK_URL"
+
+      - name: Patch APK (DUCK)
+        run: |
+          python3 patches/audiofocus_patch_precise.py --mode duck \
+            brave_original.apk brave_patched.apk
+
+      - name: Zipalign APK
+        run: |
+          zipalign -p 4 brave_patched.apk brave_aligned.apk
+
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > release.jks
+
+      - name: Sign APK
+        # Gleicher Keystore wie build.yml -> gleiche Signatur, gleicher
+        # versionCode. Damit laesst sich per 'adb install -r' jederzeit
+        # zwischen noop- und duck-APK wechseln, ohne zu deinstallieren.
+        run: |
+          apksigner sign \
+            --ks release.jks \
+            --ks-key-alias "${{ secrets.ANDROID_KEY_ALIAS }}" \
+            --ks-pass pass:${{ secrets.ANDROID_KEYSTORE_PASSWORD }} \
+            --key-pass pass:${{ secrets.ANDROID_KEY_PASSWORD }} \
+            --out brave_signed_duck.apk \
+            brave_aligned.apk
+          apksigner verify brave_signed_duck.apk && echo "SIGNED OK"
+
+      - name: Upload artifact (kein Release!)
+        uses: actions/upload-artifact@v4
+        with:
+          name: brave-duck-${{ env.BRAVE_VERSION }}
+          path: brave_signed_duck.apk
+          retention-days: 30
