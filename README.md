@@ -54,9 +54,9 @@ If you want guaranteed uninterrupted music and don't care about media keys, use 
 
 [⬇️ Download latest patched APK](https://github.com/ad2003/brave-audiofocus-build/releases/latest/download/brave_signed.apk)
 
-The released APK is built with `noop` mode and is rebuilt automatically whenever a new Brave stable release is available. No manual steps needed.
+The released APK is built with duck mode and is rebuilt automatically whenever a new Brave stable release is available. No manual steps needed.
 
-For `duck` mode, build it yourself — see below.
+If you need noop instead — for example if your music app pauses rather than ducks — build it yourself, see below.
 
 ## Installation via Obtainium (recommended)
 
@@ -88,7 +88,7 @@ Go to **Actions → Brave AudioFocus APK Patcher → Run workflow**.
 
 Leave the version field empty for the latest stable, or enter a specific version like `v1.93.125`.
 
-For `duck` mode, fork the repo and either add `--mode duck` to the patch step in `build.yml`, or use the separate `build-duck.yml` workflow, which produces the APK as a workflow artifact rather than a release.
+The released build uses duck mode. For noop, fork the repo and remove --mode duck from the patch step in build.yml.
 
 You will need to supply your own signing key as repository secrets: `ANDROID_KEYSTORE` (base64-encoded), `ANDROID_KEY_ALIAS`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_PASSWORD`.
 
