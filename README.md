@@ -78,6 +78,9 @@ The released APK is built with duck mode and is rebuilt automatically whenever a
 
 If you need noop instead — for example if your music app pauses rather than ducks — build it yourself, see below.
 
+> Note: the release APK uses `duck` mode, verified with Tidal.
+> If your music app pauses instead of ducking, see [compatibility](#music-app-compatibility-duck-mode).
+
 ## Installation via Obtainium (recommended)
 
 The easiest way to stay updated is via [Obtainium](https://github.com/ImranR98/Obtainium):
