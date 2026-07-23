@@ -11,6 +11,15 @@ Patches the Brave Android APK so that Spotify, Tidal, and other music apps are n
 > apps other than Tidal and Spotify are just as useful — the more coverage,
 > the better this table gets.
 
+## Music app compatibility (duck mode)
+
+| App | Behaviour | Reported by |
+|---|---|---|
+| Tidal | ducks and recovers correctly | maintainer |
+| Spotify | untested | — |
+
+Reports welcome — see above.
+
 ## The Problem
 
 Brave requests `AUDIOFOCUS_GAIN` whenever a video starts playing (including autoplay and inline videos while scrolling). This forces other audio apps to stop completely — not duck, not pause temporarily, just stop. They do not resume when the video ends.
