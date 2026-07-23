@@ -79,7 +79,7 @@ jobs:
 
       - name: Patch APK
         run: |
-          python3 patches/audiofocus_patch_precise.py brave_original.apk brave_patched.apk
+          python3 patches/audiofocus_patch_precise.py --mode duck brave_original.apk brave_patched.apk
 
       - name: Zipalign APK
         run: |
