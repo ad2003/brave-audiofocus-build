@@ -2,6 +2,15 @@
 
 Patches the Brave Android APK so that Spotify, Tidal, and other music apps are no longer stopped when a video starts in Brave.
 
+> **Spotify users:** duck mode has only been verified with Tidal. Spotify may
+> still pause instead of ducking. If that happens, `noop` mode is the better
+> choice for you — see [Build via GitHub Actions](#build-via-github-actions).
+>
+> Feedback welcome either way: please [open an issue](https://github.com/ad2003/brave-audiofocus-build/issues)
+> with your music app, its version, and whether it ducks or pauses. Reports for
+> apps other than Tidal and Spotify are just as useful — the more coverage,
+> the better this table gets.
+
 ## The Problem
 
 Brave requests `AUDIOFOCUS_GAIN` whenever a video starts playing (including autoplay and inline videos while scrolling). This forces other audio apps to stop completely — not duck, not pause temporarily, just stop. They do not resume when the video ends.
