@@ -24,32 +24,35 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=$(curl -sf \
-            -H "Cache-Control: no-cache" \
-            -H "Pragma: no-cache" \
-            -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/brave/brave-browser/releases?per_page=100" \
-            | python3 -c "
-          import sys, json, subprocess
-          releases = json.load(sys.stdin)
+          # Retries cover transient API hiccups (empty/5xx responses).
+          curl -sS --fail --retry 4 --retry-all-errors --retry-delay 10 --max-time 60 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -o releases.json \
+            "https://api.github.com/repos/brave/brave-browser/releases?per_page=100"
+
+          # The release list already contains each release's assets, so no
+          # per-release HEAD request is needed to check for the APK.
+          VERSION=$(python3 - releases.json Bravearm64Universal.apk << 'PY'
+          import sys, json
+          path, apk = sys.argv[1], sys.argv[2]
+          try:
+              releases = json.load(open(path))
+          except ValueError as e:
+              sys.exit(f"GitHub API returned no valid JSON: {e}")
+          if not isinstance(releases, list):
+              sys.exit(f"Unexpected API response: {str(releases)[:300]}")
           for r in releases:
-            if r.get('prerelease') or r.get('draft'):
-              continue
-            if 'nightly' in r.get('name', '').lower():
-              continue
-            if 'beta' in r.get('name', '').lower():
-              continue
-            tag = r['tag_name']
-            url = f'https://github.com/brave/brave-browser/releases/download/{tag}/Bravearm64Universal.apk'
-            result = subprocess.run(
-              ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '-L', '--max-time', '10', '-I', url],
-              capture_output=True, text=True
-            )
-            print(f'Checking {tag}: {result.stdout.strip()}', file=sys.stderr)
-            if result.stdout.strip() == '200':
-              print(tag)
-              break
-          ")
+              name = (r.get('name') or '').lower()
+              if r.get('prerelease') or r.get('draft') or 'nightly' in name or 'beta' in name:
+                  continue
+              if any(a.get('name') == apk and a.get('state') == 'uploaded'
+                     for a in r.get('assets', [])):
+                  print(r['tag_name'])
+                  break
+              print(f"Skipping {r['tag_name']}: no {apk}", file=sys.stderr)
+          PY
+          )
           if [ -z "$VERSION" ]; then
             echo "⚠️ Keine stable Version mit APK gefunden — abbruch."
             exit 1

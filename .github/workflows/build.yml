@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install tools
         run: |
@@ -49,19 +49,34 @@ jobs:
           elif [ -n "${{ github.event.inputs.brave_version }}" ]; then
             VERSION="${{ github.event.inputs.brave_version }}"
           else
-            VERSION=$(curl -sf "https://api.github.com/repos/brave/brave-browser/releases?per_page=100" \
-              | python3 -c "
+            curl -sS --fail --retry 4 --retry-all-errors --retry-delay 10 --max-time 60 \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ github.token }}" \
+              -o releases.json \
+              "https://api.github.com/repos/brave/brave-browser/releases?per_page=100"
+            VERSION=$(python3 - releases.json Bravearm64Universal.apk << 'PY'
           import sys, json
-          releases = json.load(sys.stdin)
-          stable = next(
-            r['tag_name'] for r in releases
-            if not r.get('prerelease')
-            and not r.get('draft')
-            and 'nightly' not in r.get('name', '').lower()
-            and 'beta' not in r.get('name', '').lower()
-          )
-          print(stable)
-          ")
+          path, apk = sys.argv[1], sys.argv[2]
+          try:
+              releases = json.load(open(path))
+          except ValueError as e:
+              sys.exit(f"GitHub API returned no valid JSON: {e}")
+          if not isinstance(releases, list):
+              sys.exit(f"Unexpected API response: {str(releases)[:300]}")
+          for r in releases:
+              name = (r.get('name') or '').lower()
+              if r.get('prerelease') or r.get('draft') or 'nightly' in name or 'beta' in name:
+                  continue
+              if any(a.get('name') == apk and a.get('state') == 'uploaded'
+                     for a in r.get('assets', [])):
+                  print(r['tag_name'])
+                  break
+          PY
+            )
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "⚠️ Keine stable Version mit APK gefunden — abbruch."
+            exit 1
           fi
           echo "BRAVE_VERSION=$VERSION" >> $GITHUB_ENV
           echo "Version: $VERSION"
@@ -101,7 +116,7 @@ jobs:
           apksigner verify brave_signed.apk && echo "✓ SIGNED OK"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.BRAVE_VERSION }}
           name: Brave Patched ${{ env.BRAVE_VERSION }}
