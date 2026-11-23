@@ -35,7 +35,7 @@ Chromium already contains both focus types:
     move    v8, v1       # transient path  -> 3
     goto    +2
     move    v8, v0       # normal path     -> 1   <-- patched to v1
-    iput    v8, v7, AudioFocusDelegate->a I
+    iput    v8, v7, AudioFocusDelegate->a I     (iput-byte / ->a B since 1.100)
 
 Patching the second move to source from the register already holding 3 makes
 every request transient/duckable. This is a single byte and does not change any
@@ -53,6 +53,9 @@ from pathlib import Path
 DELEGATE = 'Lorg/chromium/content/browser/AudioFocusDelegate;'
 AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK = 3
 AUDIOFOCUS_GAIN = 1
+
+# field descriptor -> matching DEX iput opcode
+IPUT_OPCODES = {'I': 0x59, 'B': 0x5d, 'C': 0x5e, 'S': 0x5f}
 
 
 # ---------------------------------------------------------------- DEX helpers
@@ -228,11 +231,13 @@ def patch_dex_duck(dex_data: bytes) -> tuple:
         return bytes(data), 0
     print(f"    found {DELEGATE} (type_idx {tidx})")
 
-    # int field that stores the focus type (Chromium names it 'a' after R8)
+    # Field that stores the focus type. R8 picks its width freely (int up to
+    # 1.99, byte since 1.100), so accept any narrow primitive. The surrounding
+    # instruction pattern checked below is what actually identifies the site.
     field_candidates = [i for i, (c, t, _n) in enumerate(fields)
-                        if c == tidx and strings[type_ids[t]] == 'I']
+                        if c == tidx and strings[type_ids[t]] in IPUT_OPCODES]
     if not field_candidates:
-        print("    ! no int field on delegate — aborting duck patch")
+        print("    ! no primitive field on delegate — aborting duck patch")
         return bytes(data), 0
 
     cd = next((c for c in classdefs if c[0] == tidx), None)
@@ -250,18 +255,20 @@ def patch_dex_duck(dex_data: bytes) -> tuple:
         b = data[start:start+length]
         print(f"    requestAudioFocus code @ 0x{code_off:x} ({length} insn bytes)")
 
-        # locate: iput vA, vB, <int field of delegate>   (opcode 0x59)
+        # locate: iput[-byte|-short|-char] vA, vB, <focus-type field>
+        # opcode must match the field's descriptor
         target = None
         for fi in field_candidates:
+            op = IPUT_OPCODES[strings[type_ids[fields[fi][1]]]]
             lo, hi = fi & 0xFF, (fi >> 8) & 0xFF
-            for i in range(len(b) - 3):
-                if b[i] == 0x59 and b[i+2] == lo and b[i+3] == hi:
+            for i in range(0, len(b) - 3, 2):
+                if b[i] == op and b[i+2] == lo and b[i+3] == hi:
                     target = (i, fi)
                     break
             if target:
                 break
         if not target:
-            print("    ! no iput to delegate int field found — aborting")
+            print("    ! no iput to delegate focus-type field found — aborting")
             continue
 
         pos, fi = target
